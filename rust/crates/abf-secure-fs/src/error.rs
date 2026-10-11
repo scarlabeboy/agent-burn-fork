@@ -78,7 +78,8 @@ pub enum ObjectKind {
     Unknown,
 }
 
-/// Coded failure of an authorization, binding check or pin.
+/// Coded failure of an authorization, binding check, pin or readable
+/// promotion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AccessError {
@@ -86,7 +87,10 @@ pub enum AccessError {
     Path(PathError),
     /// `openat2` or a required flag/mask is unavailable or denied
     /// (`ENOSYS`, `EPERM`, `EINVAL`, `E2BIG`), or the platform has no
-    /// backend. Never answered with a weaker fallback.
+    /// backend. For readable promotion, also: procfs missing or not
+    /// recognized (magic, type, device), a missing proc entry, or a
+    /// malformed, unrecognized or possibly truncated `thread-self` link.
+    /// Never answered with a weaker fallback.
     SecurePrimitiveUnavailable,
     /// The anchor or root is not on the admitted ext-family filesystem, or
     /// its device does not match.
@@ -116,6 +120,10 @@ pub enum AccessError {
     Inaccessible,
     /// `EAGAIN`/`EINTR` persisted through the bounded retries.
     RetryExhausted,
+    /// The read-only open of a promotion was refused with
+    /// `EAGAIN`/`EWOULDBLOCK` (for example a conflicting write lease). It
+    /// is never retried: each attempt could notify the lease holder again.
+    PromotionWouldBlock,
     /// Any other errno, as a number only.
     UnexpectedOs(i32),
 }
@@ -136,6 +144,7 @@ impl fmt::Display for AccessError {
             Self::IdentityUnavailable => f.write_str("identity unavailable"),
             Self::Inaccessible => f.write_str("inaccessible"),
             Self::RetryExhausted => f.write_str("retry exhausted"),
+            Self::PromotionWouldBlock => f.write_str("promotion would block"),
             Self::UnexpectedOs(errno) => write!(f, "unexpected os error {errno}"),
         }
     }

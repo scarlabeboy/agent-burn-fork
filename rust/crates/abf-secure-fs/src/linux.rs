@@ -21,6 +21,9 @@
 //! No step reads file contents, enumerates a directory, or opens an object
 //! for I/O. No step has a fallback: an unavailable primitive or flag is an
 //! error, and the flags are `const` values that no code path modifies.
+//! Readable promotion of a pin (M2A.2a) is a separate protocol in
+//! `crate::promotion`; it reuses the process-root constant and the bounded
+//! retry helper here without changing them.
 //!
 //! What establishes what (README, "Security contract"):
 //!
@@ -37,8 +40,8 @@ use crate::error::{AccessError, ObjectKind};
 use crate::path::{RelativePath, RootPath, parse_root};
 use crate::sys::linux_x86_64::{
     self as sys, E2BIG, EACCES, EAGAIN, EINTR, EINVAL, ELOOP, ENOENT, ENOSYS, ENOTDIR, EPERM,
-    EXDEV, EXT_SUPER_MAGIC, Fd, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_PATH, OpenHow,
-    RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV,
+    EXDEV, EXT_SUPER_MAGIC, Fd, HandleMetadata, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_PATH,
+    OpenHow, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV,
 };
 use crate::{FileEvidence, ObjectId};
 use std::ffi::CStr;
@@ -53,7 +56,7 @@ pub(crate) const REQUIRED_RESOLVE: u64 =
 /// `AT_FDCWD`. `RESOLVE_BENEATH` is not applicable there: it rejects every
 /// absolute path by definition. The other three flags are kept. "/" has no
 /// component to resolve, so they are defense in depth.
-const PROCESS_ROOT_HOW: OpenHow = OpenHow {
+pub(crate) const PROCESS_ROOT_HOW: OpenHow = OpenHow {
     flags: O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
     mode: 0,
     resolve: RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV,
@@ -78,19 +81,19 @@ const FILE_HOW: OpenHow = OpenHow {
 /// One initial attempt plus at most two retries after `EAGAIN`/`EINTR`.
 pub(crate) const MAX_OPEN_ATTEMPTS: u32 = 3;
 
-enum OpenFailure {
+pub(crate) enum OpenFailure {
     Errno(i32),
     RetryExhausted,
 }
 
-enum Target<'a> {
+pub(crate) enum Target<'a> {
     ProcessRoot,
     Beneath(&'a Fd, &'a CStr),
 }
 
 /// Bounded retry. `how` is a `&'static` constant: every attempt passes the
 /// identical flags and mask.
-fn open_bounded(target: Target<'_>, how: &'static OpenHow) -> Result<Fd, OpenFailure> {
+pub(crate) fn open_bounded(target: Target<'_>, how: &'static OpenHow) -> Result<Fd, OpenFailure> {
     let mut attempts = 0;
     loop {
         attempts += 1;
@@ -107,14 +110,14 @@ fn open_bounded(target: Target<'_>, how: &'static OpenHow) -> Result<Fd, OpenFai
     }
 }
 
-fn classify(failure: OpenFailure) -> AccessError {
+pub(crate) fn classify(failure: OpenFailure) -> AccessError {
     match failure {
         OpenFailure::RetryExhausted => AccessError::RetryExhausted,
         OpenFailure::Errno(errno) => classify_errno(errno),
     }
 }
 
-fn classify_errno(errno: i32) -> AccessError {
+pub(crate) fn classify_errno(errno: i32) -> AccessError {
     match errno {
         ENOSYS | EPERM | EINVAL | E2BIG => AccessError::SecurePrimitiveUnavailable,
         ELOOP | EXDEV => AccessError::ConfinementRefused,
@@ -138,11 +141,11 @@ fn classify_binding(failure: OpenFailure) -> AccessError {
 
 /// Handle-derived evidence. `kind == None` means regular file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Inspection {
-    id: ObjectId,
-    kind: Option<ObjectKind>,
-    nlink: u64,
-    size: u64,
+pub(crate) struct Inspection {
+    pub(crate) id: ObjectId,
+    pub(crate) kind: Option<ObjectKind>,
+    pub(crate) nlink: u64,
+    pub(crate) size: u64,
 }
 
 fn object_kind(metadata: &Metadata) -> Option<ObjectKind> {
@@ -166,10 +169,10 @@ fn object_kind(metadata: &Metadata) -> Option<ObjectKind> {
     }
 }
 
-/// Metadata of the held object (`statx`/`fstat` on the O_PATH descriptor).
-/// A zero device or inode number is not a concrete identity and is never
-/// accepted.
-fn inspect(fd: &Fd) -> Result<Inspection, AccessError> {
+/// Metadata of the held object (`statx`/`fstat` on the owned descriptor:
+/// the O_PATH handle, or the M2A.2a readable handle). A zero device or inode
+/// number is not a concrete identity and is never accepted.
+pub(crate) fn inspect(fd: &impl HandleMetadata) -> Result<Inspection, AccessError> {
     let metadata = fd.metadata().map_err(|error| match error.raw_os_error() {
         Some(errno) => classify_errno(errno),
         None => AccessError::IdentityUnavailable,
@@ -362,6 +365,22 @@ impl Root {
 }
 
 impl Pinned {
+    /// The held O_PATH handle, borrowed (M2A.2a promotion only).
+    pub(crate) fn handle(&self) -> &Fd {
+        &self.fd
+    }
+
+    /// The identity this file was pinned with.
+    pub(crate) fn id(&self) -> ObjectId {
+        self.id
+    }
+
+    /// M2A.2a: consumes the pin and converts it into a readable capability
+    /// that keeps owning it (see `crate::promotion`).
+    pub(crate) fn promote(self) -> Result<(crate::promotion::Readable, FileEvidence), AccessError> {
+        crate::promotion::promote(self)
+    }
+
     /// Fresh evidence from the **held** handle, never from a path. Policy is
     /// re-applied: still a regular file, same identity, exactly one link.
     pub(crate) fn reinspect(&self) -> Result<FileEvidence, AccessError> {
@@ -387,8 +406,9 @@ impl Pinned {
 pub(crate) mod schedule {
     use std::cell::RefCell;
 
-    /// Steps of [`super::Root::authorize`] and [`super::Root::pin_regular`]
-    /// at which a test hook runs.
+    /// Steps of [`super::Root::authorize`], [`super::Root::pin_regular`],
+    /// readable promotion (`crate::promotion`) and the harness-only bounded
+    /// synthetic read at which a test hook runs.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[non_exhaustive]
     pub enum SchedulePoint {
@@ -404,6 +424,22 @@ pub(crate) mod schedule {
         PinAfterAcquire,
         /// After verification, before the final binding check.
         PinAfterVerify,
+        /// Promotion: after the S0 sample of the original handle, before the
+        /// procfs anchor is acquired.
+        PromoteAfterS0,
+        /// Promotion: procfs anchor admitted, right before the terminal
+        /// readable open.
+        PromoteBeforeOpen,
+        /// Promotion: readable handle owned, before its S1 sample.
+        PromoteAfterOpen,
+        /// Promotion: after S1, before the S2 sample of the original handle.
+        PromoteAfterS1,
+        /// Promotion: after S2, before the readable capability is returned.
+        PromoteAfterS2,
+        /// Synthetic read: after the pre-read checks, before the read.
+        ReadBeforeRead,
+        /// Synthetic read: after the read, before the post-read checks.
+        ReadAfterRead,
     }
 
     type Hook = Box<dyn FnMut(SchedulePoint)>;

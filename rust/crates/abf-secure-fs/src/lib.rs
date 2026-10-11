@@ -1,4 +1,5 @@
-//! ABF M2A.1 — secure Linux file-object pinning (metadata only).
+//! ABF M2A.1 — secure Linux file-object pinning, and ABF M2A.2a — readable
+//! promotion of a pinned file (experimental, synthetic research only).
 //!
 //! A [`SecureRoot`] holds the directory **object** the caller authorized,
 //! acquired with Linux `openat2` under a mandatory confinement mask on the
@@ -14,8 +15,15 @@
 //!   ext-family root mount. Everything else fails closed with
 //!   [`AccessError::SecurePrimitiveUnavailable`] or
 //!   [`AccessError::UnsupportedFilesystem`]. There is no weaker fallback.
-//! - **Metadata only:** nothing reads file contents, enumerates directories,
-//!   or opens an object for I/O. Readable promotion is not implemented.
+//! - **Pinning is metadata only:** pinning never reads file contents,
+//!   enumerates directories, or opens an object for I/O.
+//! - **Readable promotion (M2A.2a):** [`PinnedRegularFile::promote`]
+//!   consumes a pin and returns a [`ReadableRegularFile`] that owns the
+//!   original `O_PATH` handle **and** a new read-only descriptor of the
+//!   **same** object, reopened through a private per-call procfs anchor of
+//!   the current thread (never through a pathname of the file). The default
+//!   API exposes no way to read bytes; only the two-key test harness has a
+//!   bounded synthetic read. See `README.md`, "Readable promotion".
 //! - **Confinement comes from the kernel:** every resolution beneath a held
 //!   directory uses `openat2` with the mandatory mask
 //!   `BENEATH|NO_SYMLINKS|NO_MAGICLINKS|NO_XDEV`. The crate relies on the
@@ -27,8 +35,9 @@
 //!   refused. A transient rename restored between checks is not guaranteed
 //!   to be detected. Continuous path membership is **not** claimed, and
 //!   nothing here establishes where file contents came from.
-//! - No raw descriptors, `Read` implementations, absolute reopen paths or
-//!   caller-supplied identities cross this API. Errors are codes only.
+//! - No raw descriptors, `File`, `Read`/`Seek` implementations, procfs
+//!   paths, absolute reopen paths or caller-supplied identities cross this
+//!   API. Errors are codes only.
 //!
 //! Production collection stays BLOCKED. See `README.md`.
 
@@ -87,7 +96,20 @@ mod linux;
     not(target_abi = "x32"),
     not(abf_secure_fs_force_unsupported)
 ))]
-use linux as imp;
+mod promotion;
+
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    not(target_abi = "x32"),
+    not(abf_secure_fs_force_unsupported)
+))]
+mod imp {
+    pub(crate) use crate::linux::{Pinned, Root};
+    pub(crate) use crate::promotion::Readable;
+}
 
 pub use error::{AccessError, ObjectKind, PathError};
 pub use path::{
@@ -226,6 +248,62 @@ impl PinnedRegularFile {
     pub fn reinspect(&self) -> Result<FileEvidence, AccessError> {
         self.inner.reinspect()
     }
+
+    /// Converts this pin into a [`ReadableRegularFile`] for the **same**
+    /// object. **Consumes the pin** in every case: on success the readable
+    /// capability keeps owning the original `O_PATH` handle; on failure the
+    /// pin and every handle acquired during the call are closed, and the
+    /// error carries no handle (pin again if needed).
+    ///
+    /// The new descriptor is opened `O_RDONLY|O_CLOEXEC|O_NONBLOCK` through
+    /// a fresh private procfs anchor of the calling thread, from the held
+    /// handle itself; no pathname of the file is resolved or reopened. The
+    /// original handle (before and after) and the new handle (before any
+    /// read) must each be a regular file with the pinned identity and
+    /// exactly one link. A missing or unrecognized procfs is
+    /// [`AccessError::SecurePrimitiveUnavailable`]; a non-blocking refusal
+    /// (for example a conflicting write lease) is
+    /// [`AccessError::PromotionWouldBlock`] and is never retried.
+    ///
+    /// The checks are samples, not continuous guarantees, and nothing here
+    /// is a content snapshot. Opening for reading can update access times,
+    /// generate notifications and break write leases (README).
+    pub fn promote(self) -> Result<ReadableRegularFile, AccessError> {
+        let (inner, evidence) = self.inner.promote()?;
+        Ok(ReadableRegularFile { inner, evidence })
+    }
+}
+
+/// A promoted regular file: owns the original pinned `O_PATH` handle and a
+/// read-only descriptor of the same object, and closes both on drop. Not
+/// `Clone`. Exposes no descriptor, `File`, `Read` or `Seek`; the default
+/// API cannot read bytes (M2A.2a is a research capability, not a collector).
+pub struct ReadableRegularFile {
+    inner: imp::Readable,
+    evidence: FileEvidence,
+}
+
+impl std::fmt::Debug for ReadableRegularFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadableRegularFile")
+            .field("evidence", &self.evidence)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReadableRegularFile {
+    /// Evidence sampled from the **readable** handle during promotion (S1),
+    /// before any read. A sample, not a snapshot current at return.
+    pub fn evidence(&self) -> &FileEvidence {
+        &self.evidence
+    }
+
+    /// Fresh evidence from both held handles (never from a path): both must
+    /// still be a regular file with the pinned identity and exactly one
+    /// link. Returns the readable handle's sample.
+    pub fn reinspect(&self) -> Result<FileEvidence, AccessError> {
+        self.inner.reinspect()
+    }
 }
 
 /// Compiled backend.
@@ -254,7 +332,9 @@ pub struct BackendCapabilities {
     /// (`RESOLVE_BENEATH|NO_SYMLINKS|NO_MAGICLINKS|NO_XDEV`), or 0 without a
     /// backend.
     pub required_resolve_mask: u64,
-    /// Always false in M2A.1.
+    /// [`PinnedRegularFile::promote`] is implemented (M2A.2a, Linux
+    /// backend). Runtime availability (procfs) is established only by
+    /// `promote` itself.
     pub readable_promotion: bool,
     /// Always false in M2A.1.
     pub directory_enumeration: bool,
@@ -273,8 +353,8 @@ impl BackendCapabilities {
             not(target_abi = "x32"),
             not(abf_secure_fs_force_unsupported)
         ))]
-        let (backend, metadata_pinning, required_resolve_mask) =
-            (Backend::LinuxX86_64Gnu, true, linux::REQUIRED_RESOLVE);
+        let (backend, metadata_pinning, required_resolve_mask, readable_promotion) =
+            (Backend::LinuxX86_64Gnu, true, linux::REQUIRED_RESOLVE, true);
         #[cfg(not(all(
             target_os = "linux",
             target_arch = "x86_64",
@@ -283,12 +363,13 @@ impl BackendCapabilities {
             not(target_abi = "x32"),
             not(abf_secure_fs_force_unsupported)
         )))]
-        let (backend, metadata_pinning, required_resolve_mask) = (Backend::Unavailable, false, 0);
+        let (backend, metadata_pinning, required_resolve_mask, readable_promotion) =
+            (Backend::Unavailable, false, 0, false);
         Self {
             backend,
             metadata_pinning,
             required_resolve_mask,
-            readable_promotion: false,
+            readable_promotion,
             directory_enumeration: false,
             environment_attested: false,
         }
@@ -297,7 +378,7 @@ impl BackendCapabilities {
 
 /// Fail-closed stand-in for every other target (and for the
 /// `abf_secure_fs_force_unsupported` cfg used to test this path). The types
-/// are uninhabited: no root or pinned file can ever exist.
+/// are uninhabited: no root, pinned or readable file can ever exist.
 #[cfg(not(all(
     target_os = "linux",
     target_arch = "x86_64",
@@ -314,6 +395,9 @@ mod imp {
 
     #[derive(Debug)]
     pub(crate) enum Pinned {}
+
+    #[derive(Debug)]
+    pub(crate) enum Readable {}
 
     impl Root {
         pub(crate) fn authorize(root: &str) -> Result<Self, AccessError> {
@@ -341,6 +425,16 @@ mod imp {
         pub(crate) fn reinspect(&self) -> Result<FileEvidence, AccessError> {
             match *self {}
         }
+
+        pub(crate) fn promote(self) -> Result<(Readable, FileEvidence), AccessError> {
+            match self {}
+        }
+    }
+
+    impl Readable {
+        pub(crate) fn reinspect(&self) -> Result<FileEvidence, AccessError> {
+            match *self {}
+        }
     }
 }
 
@@ -349,14 +443,21 @@ mod imp {
 /// with the feature but without the cfg does not compile (see the
 /// `compile_error!` above).
 ///
-/// It can inject errnos **instead of** real `openat2` calls, record the
+/// It can inject errnos **instead of** real `openat2`, `readlinkat` or
+/// synthetic `pread` calls, replace the procfs self-link payload, record the
 /// exact `open_how` of every attempt (an unbounded per-thread log), override
 /// the reported filesystem magic or object identity, count descriptor
 /// opens/closes and run schedule hooks. The overrides **forge** kernel
-/// evidence: they can make a refused root, a replaced binding or a different
-/// object look admitted. That is why the module exists only in a deliberate
-/// harness build. It cannot change any open flag or resolve mask. All state
-/// is thread-local.
+/// evidence: they can make a refused root, a replaced binding, a different
+/// object or a non-procfs anchor look admitted. That is why the module
+/// exists only in a deliberate harness build. It cannot change any open flag
+/// or resolve mask. All state is thread-local.
+///
+/// The same two keys also compile the only byte-reading entry point,
+/// [`ReadableRegularFile::harness_read_at`] (at most
+/// [`fault_injection::MAX_SYNTHETIC_READ`] bytes per call), and descriptor
+/// probes (status flags, offsets) used to verify the promotion against the
+/// real kernel.
 #[cfg(all(
     feature = "fault-injection",
     abf_secure_fs_harness,
@@ -377,10 +478,58 @@ pub mod fault_injection {
         pub const EPERM: i32 = 1;
         pub const ENOENT: i32 = 2;
         pub const EINTR: i32 = 4;
+        pub const EIO: i32 = 5;
         pub const E2BIG: i32 = 7;
+        pub const EBADF: i32 = 9;
         pub const EAGAIN: i32 = 11;
+        /// Same value as `EAGAIN` on Linux.
+        pub const EWOULDBLOCK: i32 = 11;
+        pub const EACCES: i32 = 13;
+        pub const ENOTDIR: i32 = 20;
         pub const EINVAL: i32 = 22;
+        pub const EMFILE: i32 = 24;
         pub const ENOSYS: i32 = 38;
+        pub const ELOOP: i32 = 40;
+    }
+
+    pub use crate::promotion::MAX_SYNTHETIC_READ;
+
+    /// Refusal of [`crate::ReadableRegularFile::harness_read_at`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum SyntheticReadError {
+        /// `limit` is 0 or above [`MAX_SYNTHETIC_READ`], or `offset + limit`
+        /// overflows the signed file-offset range. Nothing was inspected or
+        /// read.
+        Range,
+        /// A handle policy check (before or after the read) or the read
+        /// itself failed. No bytes are returned.
+        Access(crate::AccessError),
+    }
+
+    /// Real kernel descriptor flags of a promoted file (`fcntl`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct DescriptorStatus {
+        /// `F_GETFL` of the new readable descriptor.
+        pub readable_status_flags: i32,
+        /// `F_GETFD` of the new readable descriptor.
+        pub readable_fd_flags: i32,
+        /// `F_GETFL` of the retained original descriptor.
+        pub original_status_flags: i32,
+        /// `F_GETFD` of the retained original descriptor.
+        pub original_fd_flags: i32,
+    }
+
+    /// A planned replacement for one procfs self-link `readlinkat` call.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SelfLinkInjection {
+        /// Answer with this errno instead of calling the kernel.
+        Errno(i32),
+        /// Answer with this payload instead of calling the kernel. It is
+        /// truncated to the 32-byte buffer, and the returned length is the
+        /// copied length (so a payload of 32 bytes or more models a
+        /// possibly truncated kernel result).
+        Payload(Vec<u8>),
     }
 
     /// One recorded `openat2` attempt: the exact `struct open_how` that was
@@ -439,6 +588,39 @@ pub mod fault_injection {
         fault::set_identity_plan(plan);
     }
 
+    /// Plan for the next procfs self-link `readlinkat` calls on this
+    /// thread: `Some(..)` answers that call instead of the kernel, `None`
+    /// makes the real call.
+    pub fn inject_self_link(plan: &[Option<SelfLinkInjection>]) {
+        fault::set_link_plan(
+            &plan
+                .iter()
+                .map(|entry| {
+                    entry.clone().map(|injection| match injection {
+                        SelfLinkInjection::Errno(errno) => fault::LinkInjection::Errno(errno),
+                        SelfLinkInjection::Payload(bytes) => fault::LinkInjection::Payload(bytes),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// `readlinkat` attempts (real or injected) since the last reset.
+    pub fn self_link_reads() -> u64 {
+        fault::link_calls()
+    }
+
+    /// Plan for the next synthetic `pread` calls on this thread:
+    /// `Some(errno)` answers that call instead of the kernel.
+    pub fn inject_read(plan: &[Option<i32>]) {
+        fault::set_read_plan(plan);
+    }
+
+    /// Synthetic `pread` attempts (real or injected) since the last reset.
+    pub fn read_attempts() -> u64 {
+        fault::read_calls()
+    }
+
     pub fn fd_counters() -> FdCounters {
         let (opened, closed) = fault::counters();
         FdCounters { opened, closed }
@@ -458,5 +640,67 @@ pub mod fault_injection {
     pub fn reset() {
         fault::reset();
         crate::linux::schedule::clear();
+    }
+}
+
+/// Harness-only probes of a promoted file (feature `fault-injection` **and**
+/// `--cfg abf_secure_fs_harness`). Not present in any ordinary build.
+#[cfg(all(
+    feature = "fault-injection",
+    abf_secure_fs_harness,
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    not(target_abi = "x32"),
+    not(abf_secure_fs_force_unsupported)
+))]
+impl ReadableRegularFile {
+    /// The only byte-reading entry point of the crate, for synthetic test
+    /// files: one positioned read of at most `limit` bytes
+    /// (`1..=MAX_SYNTHETIC_READ`) at `offset`, staged in a fixed buffer.
+    /// Both handles are checked before and after; bytes are returned only
+    /// if the post-checks pass. A short read is returned as short (it says
+    /// nothing about the rest of the file). Does not move the offset.
+    pub fn harness_read_at(
+        &self,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Vec<u8>, fault_injection::SyntheticReadError> {
+        use crate::promotion::SyntheticReadFailure;
+        self.inner
+            .read_synthetic(offset, limit)
+            .map_err(|failure| match failure {
+                SyntheticReadFailure::Range => fault_injection::SyntheticReadError::Range,
+                SyntheticReadFailure::Access(error) => {
+                    fault_injection::SyntheticReadError::Access(error)
+                }
+            })
+    }
+
+    /// Real `F_GETFL`/`F_GETFD` of both owned descriptors. Panics on an
+    /// `fcntl` failure (test probe only).
+    pub fn harness_descriptor_status(&self) -> fault_injection::DescriptorStatus {
+        let (readable_status_flags, readable_fd_flags) =
+            self.inner.readable_status().expect("fcntl on readable");
+        let (original_status_flags, original_fd_flags) =
+            self.inner.original_status().expect("fcntl on original");
+        fault_injection::DescriptorStatus {
+            readable_status_flags,
+            readable_fd_flags,
+            original_status_flags,
+            original_fd_flags,
+        }
+    }
+
+    /// Current offset of the readable description (`lseek SEEK_CUR`).
+    pub fn harness_offset(&self) -> u64 {
+        self.inner.offset().expect("lseek on readable")
+    }
+
+    /// Sets the readable description's offset (`lseek SEEK_SET`); reads
+    /// nothing. Returns the new offset.
+    pub fn harness_seek(&self, to: u64) -> u64 {
+        self.inner.seek_to(to).expect("lseek on readable")
     }
 }

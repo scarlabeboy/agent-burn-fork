@@ -21,13 +21,17 @@ fn supported_build_describes_itself_honestly() {
     assert!(caps.metadata_pinning);
     // RESOLVE_BENEATH 8 | NO_SYMLINKS 4 | NO_MAGICLINKS 2 | NO_XDEV 1.
     assert_eq!(caps.required_resolve_mask, 0x0F);
-    assert!(!caps.readable_promotion);
+    // M2A.2a: promotion is compiled on this backend; runtime procfs
+    // availability is established only by `promote` itself.
+    assert!(caps.readable_promotion);
     assert!(!caps.directory_enumeration);
     assert!(!caps.environment_attested);
 }
 
 /// Built with `--cfg abf_secure_fs_force_unsupported` (or on any other
-/// target): every authorization fails closed after lexical validation.
+/// target): every authorization fails closed after lexical validation. No
+/// pinned or readable file can exist, so promotion is unreachable and is
+/// reported as not compiled.
 #[cfg(not(all(
     target_os = "linux",
     target_arch = "x86_64",
