@@ -8,7 +8,7 @@
 - Support **Windows alone**, **Ubuntu WSL2 alone (controlled from Windows)**, and **both**; one computer, one selected WSL distro.
 - `Computer` is a deduplicated aggregate **view**, never a third collection source. Keep environment and harness filters consistent across reports, models, charts and projects.
 - Preserve the current Agent Burn experience where practicable. Prefer correctness, reproducibility, data safety and maintainability to adding features.
-- Main engine lineage: `ccusage/ccusage` -> `Melvynx/agent-burn` -> `DavidSZD/agent-burn`. Prefer recent, verified Melvynx engine behavior; audit any DavidSZD code before reuse. Do not automatically synchronize upstream.
+- Engine heritage includes `ccusage/ccusage`. The Git upstream baseline is `Melvynx/agent-burn`; `DavidSZD/agent-burn` is a separate Windows-port reference, not an automatic Git ancestor or synchronization source. Audit reused code. Never synchronize upstream automatically.
 - Detailed product decisions live in the ABF project handoff/specifications. Do not invent or silently freeze open architectural choices.
 
 ## Authority and work scope
@@ -29,7 +29,7 @@
 
 Read-only checks such as `git status`, `git diff`, `git diff --cached`, `git log`, `git show`, `git rev-parse`, `git ls-files` and `git diff --check` require gate authorization. Check **tracked, untracked, staged and deleted** files; `git diff` alone misses new untracked files.
 
-The user stages selected files **manually in VS Code**, then executes reviewed commit/push commands. An audit PASS does not authorize publication.
+The user stages selected files **manually, through VS Code or reviewed shell commands**, then executes reviewed commit/push commands. An audit PASS does not authorize publication.
 
 ## Protect the existing working installation
 
@@ -51,12 +51,19 @@ The user stages selected files **manually in VS Code**, then executes reviewed c
 7. **Scale:** pursue incremental scans and bounded memory without losing data after log rotation, rewrite or archival; benchmark rather than assume.
 8. **Privacy:** local-first. Never emit prompts, tokens, private logs or secrets into repository, reports, telemetry or external services.
 
-**Undecided until approved:** SQLite, event schema, cross-environment identity policy, WSL startup policy and CLI bridge design. Do not present suggestions as accepted decisions.
+**Approved relevant decisions:** D15 K7 uses ACL-protected plaintext SQLite for V1, not the DPAPI-based K2 architecture. Windows and WSL are distinct collection environments, `Computer` is a computed union view, and WSL must never be started automatically without explicit authorization.
+
+**Still subject to separate approval:** detailed event and persistence schemas, unresolved cross-environment identity rules, CLI bridge design and other proposed architecture contracts. Do not present design candidates as accepted decisions.
 
 ## Engineering practices
 
 - Verify repository, branch, exact HEAD, relevant hashes and current worktree state **before** a gate affecting code; do not reset or repair differences.
 - Prefer minimal, targeted changes; respect adapter boundaries and minimize edits to upstream parsers.
+- Read the nearest package-specific `AGENTS.md` before editing package code. Root ABF safety rules and the current gate always take precedence over conflicting inherited instructions.
+- Consult relevant repository-local skills when useful and authorized, but never treat a skill as permission to activate direnv/Nix, install tools, run scripts, create PRs, mutate Git or access real data.
+- Keep Rust modules focused and internal APIs narrow; prefer synthetic fixture-backed parser and loader tests.
+- For user-facing changes, review the impact on README files, documentation, navigation and examples. Modify documentation only within the authorized gate.
+- Use US English for repository-facing GitHub issues, PRs and review comments unless the user specifies otherwise.
 - Keep collection, normalization, aggregation, quotas, pricing, persistence, Tauri commands and UI responsibilities explicit.
 - Validate all Windows/WSL path and process arguments. Document provider network calls, credential reads and side effects.
 - Preserve backward compatibility only where required by approved contracts; do not invent a migration from the production installation.
@@ -71,7 +78,7 @@ The user stages selected files **manually in VS Code**, then executes reviewed c
 - Gates (`A0`, `A1`, `A2`, `B1`, ...) are **separate** from conversation IDs.
 - Standard non-persistent reports belong in an authorized, isolated temporary directory such as `/tmp/abf1-a0-audit/` **in the running environment**. Do not assume Windows and WSL share `/tmp`.
 - Report: gate/conversation, baseline, inspect/edit list, exact commands and exit codes, tests PASS/FAIL/SKIP, findings, protected-state checks, artifacts and SHA256, risks, and **one** recommended next action (not started).
-- Finding severities: `BLOCKER`, `MAJOR`, `MINOR`. Audit verdict: `PASS`, `FINDINGS`, `HOLD`. A PASS applies only to the checked scope.
+- Finding severities: `BLOCKER`, `MAJOR`, `MINOR`. Audit verdict: `PASS`, `PASS_WITH_FINDINGS`, `HOLD`. Use `FINDINGS` only when a particular audit contract explicitly defines that legacy label. A PASS applies only to the checked scope.
 - Corrections normally return to the original author thread; an independent audit remains immutable and is repeated as warranted.
 
-**Initial phase:** architecture audit and contract design in **read-only mode**. No fork creation, installation, code edits or implementation until specifically approved by the user.
+**Current implementation status:** ABF governance and the synthetic M1 collection boundary are committed (`81745ac`). M1 is a research foundation only; production reuse is **BLOCKED** pending independently reviewed containment, memory, Windows and other safety work. No future implementation gate is implicitly authorized.
