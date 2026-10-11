@@ -1,65 +1,77 @@
-# AGENTS.md
+# Agent Burn Fork (ABF) — Instructions for coding agents
 
-This file points agents at the right repo-local skills and keeps only the guidance that should always be visible.
+**Status:** project bootstrap rules. Read this file before any operation. It grants **no permission by itself** to inspect sensitive data, execute tests, modify code, or mutate Git. The current gate prompt defines the exact allowed scope.
 
-## Skill Routing
+## Project intent
 
-Use these skills before working in this repository:
+- Build a reliable **Windows 10/11 x64** Tauri v2 desktop application, using Agent Burn's Rust engine and selectively adapting the existing Windows port.
+- Support **Windows alone**, **Ubuntu WSL2 alone (controlled from Windows)**, and **both**; one computer, one selected WSL distro.
+- `Computer` is a deduplicated aggregate **view**, never a third collection source. Keep environment and harness filters consistent across reports, models, charts and projects.
+- Preserve the current Agent Burn experience where practicable. Prefer correctness, reproducibility, data safety and maintainability to adding features.
+- Main engine lineage: `ccusage/ccusage` -> `Melvynx/agent-burn` -> `DavidSZD/agent-burn`. Prefer recent, verified Melvynx engine behavior; audit any DavidSZD code before reuse. Do not automatically synchronize upstream.
+- Detailed product decisions live in the ABF project handoff/specifications. Do not invent or silently freeze open architectural choices.
 
-- `development` - monorepo layout, bundled CLI packaging, commands, code style, dependency policy, and post-change checks.
-- `rust` - native Rust CLI implementation, parser/module layout, pricing embedding, and TypeScript parity checks.
-- `profile` - Rust and TypeScript performance profiling, branch-vs-main speed comparisons, profile reading, and optimization validation.
-- `testing` - Rust cargo tests, Node tests, CLI snapshots, Claude model names, LiteLLM pricing tests, and filesystem fixtures.
-- `typescript` - TypeScript package/tooling work, package launchers, schema tooling, and typed fixtures.
-- `agent-sources` - agent adapter log locations, token mappings, cost rules, and CLI behavior.
-- `docs` - cross-repository documentation impact checks for README files, docs guides, site navigation, screenshots, schema docs, and user-facing commands/options.
-- `skill-creator` - repo-local skill creation, SKILL.md frontmatter, description trigger quality, and reference layout.
-- `nushell` - Nushell scripts, Nix shebangs, GitHub Actions script calls, `nu-check`, and `nufmt` formatting.
-- `ast-grep` - structural code searches in Rust or TypeScript and AST-based migration verification with the dev-shell `ast-grep` CLI.
-- `rust-binary-size` - Rust release profile, dependency feature, native packaging size, and executable bloat reduction guidance based on min-sized-rust.
-- `tdd` - Red-Green-Refactor workflow for logic changes.
-- `reduce-similarities` - AST-based duplicate Rust code detection with similarity-rs; TypeScript duplication checks use `typescript` and `ast-grep`.
-- `cmux-debug` - terminal UI and responsive table verification in cmux.
-- `create-pr` - single entry point for PR work, from branch creation through AI review requests, review-thread replies, and passing CI.
-- `fix-ci` - diagnose and fix failing GitHub Actions checks with `gh`, then push small follow-up commits.
+## Authority and work scope
 
-## Monorepo Packages
+- The **user** approves architecture, sensitive operations, manual Git staging, commit/push/merge/release/deployment.
+- **ChatGPT** orchestrates gates, prompts, evidence review and independent audits in normal chat.
+- You execute **only the explicitly authorized gate**. No implicit next gate, opportunistic refactor, unauthorized subagent or scope expansion.
+- Respect per-gate read/write/execute/network/WSL allowlists. If missing, treat the capability as **not authorized**.
+- On unexpected baseline, unclear identity, sensitive access, protected-file modification or out-of-scope dependency: **STOP**, report what was found, and request renewed scope. Do not fix by improvisation.
 
-Check the nearest package-specific `AGENTS.md` before editing package code:
+## Git — strict no-mutation policy
 
-- `apps/agent-burn/AGENTS.md` - published Agent Burn CLI package
-- `docs/AGENTS.md` - TanStack Start website and documentation
+**Agents must not execute Git mutations or publication actions, even when technically possible.** Forbidden without exception for agents:
 
-## Always-On Reminders
+- `git add` (including `-N`), `commit`, `push`, `reset`, `restore`, `checkout`, `switch`, `merge`, `rebase`, `cherry-pick`, `stash`;
+- branch/tag/reference creation, update or deletion, and `git fetch`/`git pull` that change local repository state;
+- equivalent IDE, script, GitHub API or subagent actions.
 
-- The canonical user-facing CLI is `agent-burn` with only `summary` and `harness` commands.
-- Standalone agent wrapper packages and legacy report commands have been removed. Do not add docs, tests, or features that promote `agent-burn-amp`, `agent-burn-codex`, `agent-burn-opencode`, `agent-burn-pi`, `daily`, `weekly`, `monthly`, `session`, `blocks`, or `statusline`.
-- Runtime libraries for bundled packages belong in `devDependencies` unless explicitly requested otherwise.
-- When initializing this repository environment, run `direnv allow` so the pinned Nix dev shell is activated.
-- Prefer tools provided by the Nix dev shell before falling back to ad hoc installs: `rg`, `fd`, `fzf`, `delta`, `dust`, `jq`, `gh`, `hyperfine`, `similarity`, `ast-grep`, `typos`, and `typos-lsp`. When a missing tool would be useful for repeated agent work in this repository, add it to `flake.nix`.
-- The production CLI is Rust-first under `rust/crates/agent-burn`. Put new runtime behavior there unless the work is specifically about npm packaging, generated schemas, docs tooling, or benchmark scripts.
-- For Rust code, keep modules small, keep `pub(crate)` surfaces narrow, prefer fixture-backed parser/loader tests, and run cargo checks through the `just` recipes when possible.
-- TypeScript rules still apply to `.ts`, `.tsx`, `.js`, and `.jsx` package/tooling files. Use `typescript` there, especially `satisfies` and `as const satisfies` for typed literals.
-- For TypeScript package code, use `logger.ts` instead of `console.log`, use `.ts` extensions for local imports, and avoid dynamic imports.
-- After code changes, run `just fmt` when formatting may apply. Rely on git hooks and CI for covered checks; run `just typecheck` or `just test` manually when the change touches behavior, types, package code, or when hooks/CI do not cover the edited files. `just` is the single entry point for repo tasks (`just --list`); recipes route to the pnpm workspace or the Nix flake.
-- PR branches are squash-merged by default; prefer stacked, small, revertable follow-up commits over `git commit --amend` unless explicitly requested.
-- Use US English for repository-facing GitHub communication, including issue comments, PR descriptions, review replies, triage notes, and bot-directed replies.
-- Do what has been asked, nothing more. Do not proactively create documentation files unless explicitly requested.
+Read-only checks such as `git status`, `git diff`, `git diff --cached`, `git log`, `git show`, `git rev-parse`, `git ls-files` and `git diff --check` require gate authorization. Check **tracked, untracked, staged and deleted** files; `git diff` alone misses new untracked files.
 
-## Cross-Cutting Flow
+The user stages selected files **manually in VS Code**, then executes reviewed commit/push commands. An audit PASS does not authorize publication.
 
-For changes that affect user-facing agents, commands, options, report modes,
-configuration, JSON output, screenshots, or examples:
+## Protect the existing working installation
 
-1. Implement the runtime/package/docs change in the owning location.
-2. Use the `docs` skill to audit documentation impact.
-3. Update the root `README.md`, `apps/agent-burn/README.md`, relevant `docs/content/docs/`
-   pages, related cross-links, and docs navigation when the user-facing
-   surface changed.
-4. Skip documentation edits for internal-only refactors, test-only changes, or
-   skill maintenance unless they change user-facing behavior.
+**Never modify, clean, overwrite, uninstall or migrate** the currently used Agent Burn Windows app, its `%LOCALAPPDATA%\Agent Burn` data, autostart, updater, settings or caches; the WSL CLI; the historical `~/Tools/agent-burn` checkout and `fix/pricing-cache-race` branch; or real provider/tool histories. These are protected unless the user grants a separate, narrow authorization.
 
-## Development servers
+- Create all future ABF application identifiers, executables, profiles, caches, update channels and data directories **independently**. Test coexistence explicitly.
+- Never alter real Claude Code/Codex/OpenCode logs, tokens, credentials, OAuth files, provider billing information or pricing caches during tests.
+- Use synthetic fixtures or explicitly approved isolated copies. Be mindful that even a "read" can spawn `wsl.exe`, start Ubuntu, query an API, or refresh credentials.
+- No unauthorized installers, downloads, package updates, network requests, registry edits, tasks or process changes.
 
-- Use Portly (`portly ...`) for persistent development servers. Start with `portly status` and reuse healthy in-scope servers.
-- For bounded previews, use `portly temp '<command>' --path <folder> --port <port> --timeout 30m`, then `portly wait <id>` for the result. Do not launch unmanaged background servers.
+## Data-correctness invariants
+
+1. **Preserve provenance:** machine/environment, harness, session, event/record identity, source file and capture time where available.
+2. **Deduplicate cautiously:** equal timestamps/models/token totals do **not** prove event identity. Do not collapse distinct events or assert exact deduplication from pre-aggregated reports.
+3. **Separate identities:** accounts and quotas are provider/account scoped, **not environment scoped**. Never sum the same account's quota twice; never merge unverified accounts.
+4. **Distinguish money concepts:** observed tokens, estimated API cost, verified billed cost and subscription-equivalent value are different. Show tariff provenance/version and classification assumptions.
+5. **Preserve history:** failed or disabled collection, unavailable WSL/API, timeout, corrupt cache, restart or update must not silently replace reliable historical data with zero. Track freshness/status explicitly.
+6. **Determinism:** identical normalized inputs and rules should produce reproducible environment and Computer views. Version schemas and migration logic.
+7. **Scale:** pursue incremental scans and bounded memory without losing data after log rotation, rewrite or archival; benchmark rather than assume.
+8. **Privacy:** local-first. Never emit prompts, tokens, private logs or secrets into repository, reports, telemetry or external services.
+
+**Undecided until approved:** SQLite, event schema, cross-environment identity policy, WSL startup policy and CLI bridge design. Do not present suggestions as accepted decisions.
+
+## Engineering practices
+
+- Verify repository, branch, exact HEAD, relevant hashes and current worktree state **before** a gate affecting code; do not reset or repair differences.
+- Prefer minimal, targeted changes; respect adapter boundaries and minimize edits to upstream parsers.
+- Keep collection, normalization, aggregation, quotas, pricing, persistence, Tauri commands and UI responsibilities explicit.
+- Validate all Windows/WSL path and process arguments. Document provider network calls, credential reads and side effects.
+- Preserve backward compatibility only where required by approved contracts; do not invent a migration from the production installation.
+- Run **only** gate-authorized tests, builds and commands; consider their output directories and cache side effects. Never claim PASS for unexecuted tests.
+- Prefer independent expected outcomes, adversarial cases (copied sessions, token collisions, offline sources, concurrent writes, interrupted persistence) and negative-path tests.
+- Independent auditors work read-only on source by default; write reports and authorized test artifacts outside the project, never fix the audited code.
+
+## Conversation, reports and completion
+
+- Agent **new conversation** IDs: `ABF1`, `ABF2`, `ABF11`, `ABF111`, etc. (sequential integers, no mandatory padding).
+- **Resume** retains its integer and adds `B`, `C`, `D`...: `ABF1B` = first resume of `ABF1`. New independent audit = new integer.
+- Gates (`A0`, `A1`, `A2`, `B1`, ...) are **separate** from conversation IDs.
+- Standard non-persistent reports belong in an authorized, isolated temporary directory such as `/tmp/abf1-a0-audit/` **in the running environment**. Do not assume Windows and WSL share `/tmp`.
+- Report: gate/conversation, baseline, inspect/edit list, exact commands and exit codes, tests PASS/FAIL/SKIP, findings, protected-state checks, artifacts and SHA256, risks, and **one** recommended next action (not started).
+- Finding severities: `BLOCKER`, `MAJOR`, `MINOR`. Audit verdict: `PASS`, `FINDINGS`, `HOLD`. A PASS applies only to the checked scope.
+- Corrections normally return to the original author thread; an independent audit remains immutable and is repeated as warranted.
+
+**Initial phase:** architecture audit and contract design in **read-only mode**. No fork creation, installation, code edits or implementation until specifically approved by the user.
