@@ -1,0 +1,14 @@
+[package]
+name = "abf-collection-boundary"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "ABF M1: explicit, metadata-only collection boundary with a synthetic fixture ingestion path"
+
+# Deliberately std-only: the boundary must build offline without the upstream
+# workspace, its build scripts, or any registry access.
+[dependencies]
+
+# Standalone workspace root so this crate never re-resolves the upstream
+# `rust/Cargo.lock`. Joining the upstream workspace is a later, reviewed change.
+[workspace]
