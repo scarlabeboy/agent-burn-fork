@@ -1,0 +1,38 @@
+[package]
+name = "abf-secure-fs"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+description = "ABF M2A.1: Linux x86_64 GNU (LP64) file-object pinning under an authorized root (metadata only)"
+
+# Deliberately dependency-free: the only foreign code is glibc, through a
+# small documented ABI module (`src/sys/linux_x86_64.rs`).
+[dependencies]
+
+[features]
+# Test-only harness: errno injection, filesystem-magic and identity
+# overrides, an open_how log, fd counters and schedule hooks. The overrides
+# can FORGE kernel evidence, so the feature is fail-closed: it compiles only
+# together with `--cfg abf_secure_fs_harness`, set deliberately for an
+# isolated synthetic test build. Without that cfg (for example with
+# `--all-features`, or when another dependency enables the feature) the
+# crate refuses to compile. Never enable it in a production build.
+fault-injection = []
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "deny"
+unexpected_cfgs = { level = "deny", check-cfg = [
+    "cfg(abf_secure_fs_force_unsupported)",
+    "cfg(abf_secure_fs_harness)",
+] }
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+# Standalone workspace root, so this crate never re-resolves the upstream
+# `rust/Cargo.lock` or compiles upstream crates.
+[workspace]
