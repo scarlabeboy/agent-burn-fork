@@ -16,6 +16,11 @@ Status:
 - M2A.2b directory enumeration: implementation candidate from conversation
   ABF18, following the ABF17/ABF17B design. It requires an independent
   read-only security review (ABF19) before any use.
+- Prerequisite admission hardening (conversation ABF26, following the ABF25
+  design): sealed private procfs admission types (F16-1) and corrected
+  cancellation (F18-6), failure-ownership (F19-3) and held-object authority
+  (A23-2) documentation. No reader was added. It requires an independent
+  read-only security review before any use.
 
 **Production collection: BLOCKED.** The default API reads no file contents
 (only the two-key test harness can read bounded synthetic bytes), enumerates
@@ -171,6 +176,31 @@ at those moments".
 the root is inside the root. Nothing here says where its bytes came from,
 and no content is read.
 
+### Authority of a held object (A23-2)
+
+A pin (from `SecureRoot::pin_regular` or `DirectoryListing::pin_regular`)
+holds **the admissible object acquired and independently verified beneath
+the held root at those resolution samples**. Precisely:
+
+- the object can be moved outside the root **before** the pin is returned.
+  For a child pin this can happen while the directory checks before and
+  after the pin both pass: if the directory is swapped for a replacement
+  holding a new file, the pin is taken inside the replacement, and the
+  original directory is then restored, the returned pin holds the
+  replacement's file, outside the root, while the listing's directory is
+  back in place (tested natively, schedule D/E/X/Y);
+- the held object can differ from the entry seen during discovery and from
+  the original directory's lineage;
+- promotion exercises that held-object authority: it performs no root or
+  path check and succeeds after the object was moved out.
+
+Acquisition-time resolution confinement (A) and identity verification (B)
+do **not** establish continuous membership, authentic origin, immutable
+lineage or content coherence. This authority is **not** consent to read
+bytes: the default build has no content API, and the eventual production
+consent policy (held-object authority, sampled original bindings, or a
+stronger architecture) is undecided.
+
 Further limits:
 
 - `nlink == 1` is a sampled policy, enforced at acquisition, verification
@@ -217,6 +247,42 @@ the payload is never stored or printed. The mandatory source-path masks
 `open_how` values are private constants of the ABI module and are never
 available to source-path resolution.
 
+#### Private admission chain (F16-1)
+
+The steps above are encoded as sealed private types inside the ABI module
+(`sys::linux_x86_64::admission`). Each value has private fields and is
+minted only by the checked constructor of the previous state, so no other
+code in the crate can build one, read its descriptor or skip a state:
+
+| State | Minted by | Check |
+|---|---|---|
+| process root | the constant `/` and the unchanged process-root `open_how` | — |
+| candidate proc root | `proc` beneath that process root | none (no operation except admission) |
+| admitted proc root | admission of the candidate | procfs magic, directory; device kept |
+| candidate self link | `thread-self` beneath **that** admitted root | none |
+| admitted self link | admission of the candidate | procfs magic, symlink, the root's device |
+| current task | one bounded `readlinkat` of the admitted link + strict parse | canonical `<pid>/task/<tid>` |
+| candidate `fd` directory | `<pid>/task/<tid>/fd` beneath the task's **own** admitted root | none |
+| admitted `fd` directory | admission of the candidate | procfs magic, directory, the chain's device |
+| admitted regular source | the existing S0 sample of a genuine pin (borrowed) | regular, pinned identity, `nlink == 1` |
+
+The relaxed terminal open accepts **only** an admitted `fd` directory and
+an admitted regular source: candidate directories, generic descriptors and
+arbitrary task numbers cannot be supplied, and its `resolve = 0` `open_how`
+is nameable only inside that module. A task is derived only from the
+kernel's own `thread-self` link; parsing numbers never creates one. The task
+carries the admitted root it came from, so the `fd` directory is always
+opened beneath the same chain (not merely a value with an equal lifetime).
+Task-derived values are `!Send` and `!Sync` (checked at compile time), are
+created per call and are never cached, cloned or duplicated; a pin moved to
+another thread **before** promotion is promoted with that thread's own fresh
+chain. Admission adds no descriptor, allocation or system call: the open
+sequence, masks, retries and S0/S1/S2 placement are unchanged, and admission
+remains a sample (it classifies procfs; it does not authenticate the mount
+or prove an enduring state). The ABI module itself (the only `unsafe` code)
+remains the trusted base: its private raw `openat2` helper is not reachable
+from other modules.
+
 Ownership: every successful system call result is wrapped into exactly one
 owner immediately. `O_PATH` handles (`Fd`, and the private procfs
 capabilities built on it) and the readable handle (`ReadableFd`) are
@@ -255,7 +321,9 @@ Retries and errors:
 - **Not a snapshot:** size is evidence only; bytes can change during and
   after promotion. Nothing here establishes continuous namespace membership,
   immutable bytes, content origin or event identity. The pin stores no root
-  capability; promotion exercises the existing object authority.
+  capability; promotion exercises the existing held-object authority, also
+  for an object moved out of the root (see "Authority of a held object
+  (A23-2)"). That authority is not consent to read bytes.
 - **Side effects of an ordinary read open** are not zero: a read can update
   access times (mount policy), and opens/reads/closes can generate
   notifications. An `O_NONBLOCK` open can fail with `EWOULDBLOCK` **and**
@@ -392,12 +460,25 @@ A reached ceiling stops before the next action without an extra read to look
 for the end; the last permitted batch is still parsed subject to the record,
 candidate, byte and cancellation limits (tie order: cancellation, records,
 candidates, bytes, then attempts). A name that would exceed the byte budget
-is charged as inspected and not stored. Cancellation requested before the
-call (or observed before the first read) is `EnumerationError::Cancelled`
-before any allocation or open (when requested on entry). Observed later, it
-yields a `Partial`/`Cancelled` listing after the final checks; observed at
-release it wins over end of stream and budgets. A fatal syscall, framing,
-binding or storage error always wins and discards every candidate.
+is charged as inspected and not stored.
+
+Cancellation (F18-6) is polled; it cannot interrupt a system call in
+progress:
+
+- **already requested on entry:** `EnumerationError::Cancelled` before any
+  new allocation or read-handle open. The consumed directory pin is still
+  dropped;
+- **first observed later but before the first `getdents64` attempt** (for
+  example after the storage reservation or after the read handle was
+  opened): also `EnumerationError::Cancelled`, but that reservation and
+  handle acquisition may already have happened; both are released;
+- **observed after any attempt**, including an interrupted (`EINTR`) one:
+  a checked `Partial`/`Cancelled` listing after the final checks. It can
+  contain **zero** candidates;
+- **observed at release:** wins over end of stream and budgets.
+
+A fatal syscall, framing, binding or storage error always wins over
+cancellation and discards the whole listing.
 
 ### Child authorization
 
@@ -408,9 +489,18 @@ directory binding, runs the **unchanged** `SecureRoot::pin_regular` from the
 **held root** (never from the held directory descriptor), and checks both
 bindings again (a refused result is dropped). The discovered name is a
 request, not evidence: a replacement or moved-in regular file that is
-currently, admissibly bound there may be pinned as a different object;
-symlinks, directories, special files, multiple links and missing names are
-refused by the file protocol. Nothing is promoted or read.
+admissibly bound there at the pin's resolution samples may be pinned as a
+different object; symlinks, directories, special files, multiple links and
+missing names are refused by the file protocol. Nothing is promoted or read.
+The returned pin has the held-object authority described in "Authority of a
+held object (A23-2)": it may already be outside the root on return.
+
+Failure ownership (F19-3) differs between the two operations:
+
+| Operation | On failure |
+|---|---|
+| `PinnedDirectory::enumerate` | consumes the directory pin, returns **no** listing, discards every staged candidate |
+| `DirectoryListing::pin_regular` | returns **no** child pin, only **borrows** the listing and leaves it available; every later request authorizes afresh and can still refuse |
 
 ### Privacy
 

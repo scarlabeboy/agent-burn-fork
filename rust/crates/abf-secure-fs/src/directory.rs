@@ -27,20 +27,35 @@
 //! (held pin again). The handle is closed before the listing is released.
 //!
 //! **Enumeration** ([`Directory::enumerate`]): cancellation is polled first
-//! (refusal before any allocation or open); storage is reserved once and
-//! checked against the retained-output ceiling; binding checks run at start,
-//! after the read open, after **every** `getdents64` attempt and before
-//! release. Any binding, system-call, framing or storage refusal discards the
-//! whole listing. Budget or cancellation stops release only what was kept,
-//! as `Partial`, after the final checks pass.
+//! (when already requested on entry: refusal before any new allocation or
+//! open; the consumed pin is still dropped); storage is reserved once and
+//! checked against the retained-output ceiling; cancellation is polled again
+//! before the start check and before the first attempt, so a refusal there
+//! can follow the reservation and the read open; binding checks run at
+//! start, after the read open, after **every** `getdents64` attempt and
+//! before release. Any binding, system-call, framing or storage refusal
+//! consumes the pin, returns no listing and discards every candidate. Budget
+//! or cancellation stops after an attempt release only what was kept (which
+//! can be nothing), as `Partial`, after the final checks pass.
 //!
 //! **Child authorization** ([`Listing::pin_regular`]): the candidate is
 //! named by an ordinal of its own listing; the joined root-relative path is
 //! revalidated; root and directory binding are checked; the **unchanged**
 //! `Root::pin_regular` resolves the full path from the **held root**; root
 //! and directory binding are checked again. The held directory descriptor is
-//! never an anchor for a child, and a discovered name is never evidence:
-//! the pinned object is whatever is currently, admissibly bound there.
+//! never an anchor for a child, and a discovered name is never evidence.
+//! The request borrows the listing: a refusal returns no pin and leaves the
+//! listing available for a later, independent authorization.
+//!
+//! Authority of a child pin (A23-2): it holds the admissible object that the
+//! two confined root-relative resolutions acquired and verified at those
+//! samples. That object can differ from the discovered entry and from the
+//! held directory's lineage, and it can be moved outside the root before the
+//! pin is returned while the directory pre/post checks still pass (a swap
+//! restored around the pin). The post check is a sample of the held
+//! directory, not of the child. Nothing here establishes continuous
+//! membership, authentic origin, immutable lineage, content coherence or
+//! consent to read bytes.
 //!
 //! Descriptors: the root's two, the pin, the read handle and one transient
 //! verification handle: at most five during enumeration; a listing keeps
@@ -415,7 +430,10 @@ impl Listing<'_> {
         self.ledger
     }
 
-    /// Fresh root-relative authorization of candidate `ordinal`.
+    /// Fresh root-relative authorization of candidate `ordinal`. Borrows the
+    /// listing; a refusal returns no pin and leaves the listing intact. The
+    /// pinned object is the one acquired at this request (A23-2, module
+    /// documentation), not a proof about the discovered entry.
     pub(crate) fn pin_regular(
         &self,
         ordinal: usize,

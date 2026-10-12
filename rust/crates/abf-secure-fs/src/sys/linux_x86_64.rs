@@ -30,7 +30,8 @@
 //! Ownership invariant: a raw descriptor returned by the kernel is wrapped
 //! into an `OwnedFd` immediately, exactly once, before any other code runs,
 //! and then moved into exactly one typed owner: [`Fd`] (always an `O_PATH`
-//! descriptor), one of the private procfs capabilities built on it,
+//! descriptor), one of the private procfs admission states built on it
+//! (module [`admission`]),
 //! [`DirectoryPinFd`] (an `O_PATH|O_DIRECTORY` directory pin built on it),
 //! [`ReadableFd`] (the only regular-file descriptor opened for reading) or
 //! [`DirectoryReadFd`] (the only directory descriptor opened for reading).
@@ -49,10 +50,13 @@
 //! M2A.2a procfs exception (README, "Readable promotion"): the procfs opens
 //! below take **no** caller-supplied path, flags or descriptor number. Their
 //! names are constants or decimal numbers formatted here, and their
-//! `open_how` values are private constants. The relaxed terminal resolution
-//! (`resolve = 0`) exists only in [`open_readable_leaf`], whose directory
-//! argument can only come from the constant procfs chain. Directory
-//! enumeration (M2A.2b) uses **no** procfs path and no relaxed mask.
+//! `open_how` values are private constants of the [`admission`] module. The
+//! relaxed terminal resolution (`resolve = 0`) exists only in
+//! [`admission::AdmittedFdDir::open_readable`], which accepts only the
+//! admitted per-call `fd` directory of the calling thread and an admitted
+//! regular source (F16-1): a candidate, a generic [`Fd`] or a task number
+//! cannot be supplied. Directory enumeration (M2A.2b) uses **no** procfs
+//! path and no relaxed mask.
 
 use std::ffi::{CStr, c_char, c_int, c_long};
 use std::fs::{File, Metadata};
@@ -349,7 +353,8 @@ fn openat2_owned(dirfd: c_int, path: &CStr, how: &OpenHow) -> Result<OwnedFd, i3
     //   readable procfs leaf and the directory self-open uses O_PATH, which
     //   does not open the object for I/O. The leaf's O_RDONLY|O_NONBLOCK
     //   open is reached only for the still-owned, previously type-checked
-    //   regular source (see `open_readable_leaf`); the directory self-open's
+    //   regular source (see `admission::AdmittedFdDir::open_readable`); the
+    //   directory self-open's
     //   O_RDONLY|O_DIRECTORY open only for "." of a held directory pin (see
     //   `open_directory_read`).
     let ret: c_long = unsafe {
@@ -403,43 +408,8 @@ pub(crate) fn filesystem_magic(fd: &Fd) -> Result<i64, i32> {
 }
 
 // ---------------------------------------------------------------------------
-// M2A.2a: private procfs capabilities and the readable leaf
+// M2A.2a: private procfs admission chain and the readable leaf (F16-1)
 // ---------------------------------------------------------------------------
-
-/// `proc` beneath the held process root "/". `RESOLVE_NO_XDEV` is omitted
-/// **only here**, because the trusted proc mount is necessarily another
-/// mount. BENEATH, NO_SYMLINKS and NO_MAGICLINKS are kept.
-const PROC_MOUNT_HOW: OpenHow = OpenHow {
-    flags: O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
-    mode: 0,
-    resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
-};
-
-/// `thread-self` beneath the admitted proc root, full mask, not followed:
-/// with `O_PATH|O_NOFOLLOW`, openat2 returns the final symlink itself
-/// (documented exception), so only its metadata is ever used.
-const PROC_SELF_LINK_HOW: OpenHow = OpenHow {
-    flags: O_PATH | O_NOFOLLOW | O_CLOEXEC,
-    mode: 0,
-    resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV,
-};
-
-/// `<pid>/task/<tid>/fd` beneath the admitted proc root, full mask.
-const PROC_FD_DIR_HOW: OpenHow = OpenHow {
-    flags: O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
-    mode: 0,
-    resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV,
-};
-
-/// The terminal open of the generated `<fd>` leaf. `resolve = 0` is
-/// required: every confinement flag refuses the magic-link jump. This is the
-/// **only** relaxed resolution in the crate. No O_PATH, O_NOFOLLOW, O_CREAT,
-/// O_TRUNC, O_TMPFILE or write access; mode 0.
-const PROC_FD_LEAF_HOW: OpenHow = OpenHow {
-    flags: O_RDONLY | O_CLOEXEC | O_NONBLOCK,
-    mode: 0,
-    resolve: 0,
-};
 
 /// Largest accepted PID/TID: the positive `int` range.
 pub(crate) const MAX_TASK_ID: u32 = 2_147_483_647;
@@ -511,95 +481,20 @@ fn task_fd_dir_name(pid: u32, tid: u32) -> Option<ProcName> {
     Some(name)
 }
 
-/// Opaque `Debug`, handle metadata and filesystem magic for a private
-/// procfs capability. Its inner [`Fd`] is never handed out.
-macro_rules! proc_capability {
-    ($name:ident) => {
-        impl std::fmt::Debug for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(concat!(stringify!($name), "(..)"))
-            }
-        }
-
-        impl HandleMetadata for $name {
-            fn metadata(&self) -> io::Result<Metadata> {
-                self.fd.metadata()
-            }
-        }
-
-        impl $name {
-            pub(crate) fn filesystem_magic(&self) -> Result<i64, i32> {
-                filesystem_magic(&self.fd)
-            }
-        }
-    };
-}
-
-/// Candidate procfs root: only produced by [`open_proc_root`] from the
-/// constant name `proc`. The promotion protocol admits it by handle.
-pub(crate) struct ProcRoot {
-    fd: Fd,
-}
-
-/// The not-followed `thread-self` link of a [`ProcRoot`]: only produced by
-/// [`open_thread_self`].
-pub(crate) struct ProcSelfLink {
-    fd: Fd,
-}
-
-/// A task `fd` directory: only produced by [`open_task_fd_dir`] from a
-/// [`ProcRoot`] and two numbers. The only directory type accepted by
-/// [`open_readable_leaf`].
-pub(crate) struct ProcFdDir {
-    fd: Fd,
-}
-
-proc_capability!(ProcRoot);
-proc_capability!(ProcSelfLink);
-proc_capability!(ProcFdDir);
-
-/// One attempt: the constant name `proc` beneath the held process root.
-pub(crate) fn open_proc_root(process_root: &Fd) -> Result<ProcRoot, i32> {
-    openat2_once(process_root.raw(), c"proc", &PROC_MOUNT_HOW).map(|fd| ProcRoot { fd })
-}
-
-/// One attempt: the constant name `thread-self` beneath `proc_root`, not
-/// followed.
-pub(crate) fn open_thread_self(proc_root: &ProcRoot) -> Result<ProcSelfLink, i32> {
-    openat2_once(proc_root.fd.raw(), c"thread-self", &PROC_SELF_LINK_HOW)
-        .map(|fd| ProcSelfLink { fd })
-}
-
-/// One attempt: `<pid>/task/<tid>/fd` beneath `proc_root`, formatted here
-/// from two numbers in `1..=MAX_TASK_ID` (`EINVAL` otherwise).
-pub(crate) fn open_task_fd_dir(proc_root: &ProcRoot, pid: u32, tid: u32) -> Result<ProcFdDir, i32> {
-    if !(1..=MAX_TASK_ID).contains(&pid) || !(1..=MAX_TASK_ID).contains(&tid) {
-        return Err(EINVAL);
-    }
-    let name = task_fd_dir_name(pid, tid).ok_or(EINVAL)?;
-    let path = name.as_c_str().ok_or(EINVAL)?;
-    openat2_once(proc_root.fd.raw(), path, &PROC_FD_DIR_HOW).map(|fd| ProcFdDir { fd })
-}
-
 /// Size of the fixed self-link buffer. A result that fills it is treated as
 /// possibly truncated and refused.
 pub(crate) const SELF_LINK_CAPACITY: usize = 32;
 
 /// The bytes the kernel returned for a self link, `len < SELF_LINK_CAPACITY`.
-/// `Debug` never prints them.
-pub(crate) struct SelfLinkBytes {
+/// `Debug` never prints them. Private to the ABI module: only the admission
+/// chain below reads and parses a self link.
+struct SelfLinkBytes {
     buf: [u8; SELF_LINK_CAPACITY],
     len: usize,
 }
 
-impl std::fmt::Debug for SelfLinkBytes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SelfLinkBytes(..)")
-    }
-}
-
 impl SelfLinkBytes {
-    pub(crate) fn as_bytes(&self) -> &[u8] {
+    fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.len]
     }
 }
@@ -611,9 +506,10 @@ pub(crate) enum LinkReadError {
     Truncated,
 }
 
-/// One direct `readlinkat(link, "", buf, 32)` system call on the owned,
-/// not-followed self link. No libc wrapper, no fallback, no retry.
-pub(crate) fn read_self_link(link: &ProcSelfLink) -> Result<SelfLinkBytes, LinkReadError> {
+/// One direct `readlinkat(link, "", buf, 32)` system call on an owned,
+/// not-followed link descriptor. No libc wrapper, no fallback, no retry.
+/// Private: its only caller is [`admission::AdmittedSelfLink`].
+fn read_self_link(link: &Fd) -> Result<SelfLinkBytes, LinkReadError> {
     let mut buf = [0_u8; SELF_LINK_CAPACITY];
 
     #[cfg(all(feature = "fault-injection", abf_secure_fs_harness))]
@@ -629,7 +525,7 @@ pub(crate) fn read_self_link(link: &ProcSelfLink) -> Result<SelfLinkBytes, LinkR
     // SAFETY:
     // - `syscall` is the glibc variadic wrapper declared above; every
     //   variadic argument is full register width (c_long, pointers, usize).
-    // - `link.fd` is a live descriptor borrowed for the whole call.
+    // - `link` is a live descriptor borrowed for the whole call.
     // - `path_ptr` is the static empty NUL-terminated string: the call acts
     //   on the O_PATH|O_NOFOLLOW link descriptor itself (documented
     //   readlinkat empty-path form).
@@ -639,7 +535,7 @@ pub(crate) fn read_self_link(link: &ProcSelfLink) -> Result<SelfLinkBytes, LinkR
     let ret: c_long = unsafe {
         syscall(
             SYS_READLINKAT,
-            c_long::from(link.fd.raw()),
+            c_long::from(link.raw()),
             path_ptr,
             buf_ptr,
             SELF_LINK_CAPACITY,
@@ -667,25 +563,777 @@ fn self_link_result(
     Ok(SelfLinkBytes { buf, len })
 }
 
-/// One attempt: opens the generated decimal leaf of the still-owned `source`
-/// descriptor beneath the task `fd` directory, with the fixed
-/// `O_RDONLY|O_CLOEXEC|O_NONBLOCK`, mode 0, resolve 0.
+/// The private procfs admission chain of readable promotion (F16-1).
 ///
-/// The leaf name is formatted here from `source`'s own descriptor number
-/// (at most ten digits, no `/`); it never comes from a caller, a string or a
-/// `readlink` of the descriptor. `source` is borrowed for the whole call, so
-/// that number stays bound to the same open description. The kernel follows
-/// the fd entry's magic link to the object held by `source`, not to any
-/// pathname.
-pub(crate) fn open_readable_leaf(dir: &ProcFdDir, source: &Fd) -> Result<ReadableFd, i32> {
-    let number = u32::try_from(source.raw()).map_err(|_| EINVAL)?;
-    let mut name = ProcName::new();
-    name.decimal(number).ok_or(EINVAL)?;
-    let leaf = name.as_c_str().ok_or(EINVAL)?;
-    let owned = openat2_owned(dir.fd.raw(), leaf, &PROC_FD_LEAF_HOW)?;
-    Ok(ReadableFd {
-        file: File::from(owned),
-    })
+/// Every value below has **private fields** and is minted **only** by the
+/// checked constructor of the previous state, inside this module. Code
+/// outside it (including the rest of this ABI module, `crate::promotion`
+/// and every other sibling) can hold, move and drop these values, but cannot
+/// construct one, read its descriptor, or skip a state:
+///
+/// 1. [`ProcessRoot`]: the constant `/` with the unchanged
+///    `crate::linux::PROCESS_ROOT_HOW` (mask 0x07). No path, flags or
+///    descriptor input.
+/// 2. [`CandidateProcRoot`]: the constant `proc` beneath a [`ProcessRoot`]
+///    (mask 0x0E). It has no operation except [`CandidateProcRoot::admit`].
+/// 3. [`AdmittedProcRoot`]: procfs magic, directory; its device is kept.
+/// 4. [`CandidateSelfLink`]: the constant `thread-self` beneath **that**
+///    admitted root, not followed (full mask). It borrows the root.
+/// 5. [`AdmittedSelfLink`]: procfs magic, symlink, the root's device.
+/// 6. [`CurrentTask`]: one bounded `readlinkat` of the admitted link,
+///    parsed by the strict canonical grammar. It carries the borrowed
+///    admitted root it came from: the task `fd` directory can only be
+///    opened beneath that same root (one chain, not a lifetime coincidence).
+///    No constructor accepts numbers: parsing never creates authority.
+/// 7. [`CandidateFdDir`]: `<pid>/task/<tid>/fd` formatted here from the
+///    task, beneath its own root (full mask), with that root's device.
+/// 8. [`AdmittedFdDir`]: procfs magic, directory, the chain's device.
+/// 9. [`AdmittedRegularSource`]: borrows a genuine [`Pinned`] and is minted
+///    only by the existing S0 sample (`Pinned::reinspect`: regular file,
+///    pinned identity, `nlink == 1`); no second S0 sample is taken.
+///
+/// The terminal relaxed open ([`AdmittedFdDir::open_readable`]) accepts
+/// **only** an [`AdmittedFdDir`] and an [`AdmittedRegularSource`]; no
+/// generic [`Fd`], candidate, raw number, path or flags. Its `open_how`
+/// (`resolve = 0`) is a private constant of this module, so no other code
+/// can name it.
+///
+/// Task-derived values ([`CandidateSelfLink`] onwards, except the source)
+/// are `!Send` and `!Sync`: a calling thread's procfs anchor never moves to
+/// another thread. Every value is created per call and dropped by the
+/// caller; nothing is cached, cloned or duplicated. Admission is a sample of
+/// type, magic and device at that moment: it classifies, it does not
+/// authenticate the mount or prove an enduring state.
+pub(crate) mod admission {
+    use super::{
+        Fd, LinkReadError, MAX_TASK_ID, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, O_PATH,
+        O_RDONLY, OpenHow, PROC_SUPER_MAGIC, ProcName, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS,
+        RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV, ReadableFd, SelfLinkBytes, filesystem_magic,
+        openat2_once, openat2_owned, openat2_process_root, read_self_link, task_fd_dir_name,
+    };
+    use crate::error::AccessError;
+    use crate::linux::{PROCESS_ROOT_HOW, Pinned};
+    use std::fs::{File, Metadata};
+    use std::io;
+    use std::marker::PhantomData;
+    use std::mem::size_of;
+    use std::os::unix::fs::MetadataExt;
+    use std::rc::Rc;
+
+    /// `proc` beneath the held process root "/". `RESOLVE_NO_XDEV` is
+    /// omitted **only here**, because the trusted proc mount is necessarily
+    /// another mount. BENEATH, NO_SYMLINKS and NO_MAGICLINKS are kept.
+    const PROC_MOUNT_HOW: OpenHow = OpenHow {
+        flags: O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+        mode: 0,
+        resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+    };
+
+    /// `thread-self` beneath the admitted proc root, full mask, not
+    /// followed: with `O_PATH|O_NOFOLLOW`, openat2 returns the final symlink
+    /// itself (documented exception), so only its metadata is ever used.
+    const PROC_SELF_LINK_HOW: OpenHow = OpenHow {
+        flags: O_PATH | O_NOFOLLOW | O_CLOEXEC,
+        mode: 0,
+        resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV,
+    };
+
+    /// `<pid>/task/<tid>/fd` beneath the admitted proc root, full mask.
+    const PROC_FD_DIR_HOW: OpenHow = OpenHow {
+        flags: O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+        mode: 0,
+        resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV,
+    };
+
+    /// The terminal open of the generated `<fd>` leaf. `resolve = 0` is
+    /// required: every confinement flag refuses the magic-link jump. This is
+    /// the **only** relaxed resolution in the crate, and this private
+    /// constant is nameable only inside this module. No O_PATH, O_NOFOLLOW,
+    /// O_CREAT, O_TRUNC, O_TMPFILE or write access; mode 0.
+    const PROC_FD_LEAF_HOW: OpenHow = OpenHow {
+        flags: O_RDONLY | O_CLOEXEC | O_NONBLOCK,
+        mode: 0,
+        resolve: 0,
+    };
+
+    /// Zero-sized marker that makes a type `!Send` and `!Sync`.
+    type ThreadBound = PhantomData<Rc<()>>;
+
+    /// Refusal of one admission sample.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum AdmissionRefusal {
+        /// `fstatfs` or `statx` failed with this errno.
+        Errno(i32),
+        /// Wrong magic, type or device, or metadata without an errno.
+        NotAdmitted,
+    }
+
+    /// Refusal of the self-link read.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum TaskRefusal {
+        Link(LinkReadError),
+        /// Not exactly the canonical `<pid>/task/<tid>` spelling.
+        Malformed,
+    }
+
+    /// Kind of a procfs handle, as far as admission cares.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Directory,
+        Symlink,
+        Other,
+    }
+
+    /// The handle facts an admission decision uses.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Facts {
+        kind: Kind,
+        device: u64,
+    }
+
+    fn facts(metadata: io::Result<Metadata>) -> Result<Facts, AdmissionRefusal> {
+        let metadata = metadata.map_err(|error| match error.raw_os_error() {
+            Some(errno) => AdmissionRefusal::Errno(errno),
+            None => AdmissionRefusal::NotAdmitted,
+        })?;
+        let file_type = metadata.file_type();
+        let kind = if file_type.is_dir() {
+            Kind::Directory
+        } else if file_type.is_symlink() {
+            Kind::Symlink
+        } else {
+            Kind::Other
+        };
+        Ok(Facts {
+            kind,
+            device: metadata.dev(),
+        })
+    }
+
+    /// Procfs directory admission: magic first, then metadata, directory,
+    /// and (when given) the chain's device. Returns the device.
+    fn directory_verdict(
+        magic: Result<i64, i32>,
+        facts: Result<Facts, AdmissionRefusal>,
+        device: Option<u64>,
+    ) -> Result<u64, AdmissionRefusal> {
+        let magic = magic.map_err(AdmissionRefusal::Errno)?;
+        if magic != PROC_SUPER_MAGIC {
+            return Err(AdmissionRefusal::NotAdmitted);
+        }
+        let facts = facts?;
+        if facts.kind != Kind::Directory {
+            return Err(AdmissionRefusal::NotAdmitted);
+        }
+        if device.is_some_and(|device| device != facts.device) {
+            return Err(AdmissionRefusal::NotAdmitted);
+        }
+        Ok(facts.device)
+    }
+
+    /// Self-link admission: procfs magic, symlink, the chain's device.
+    fn link_verdict(magic: i64, facts: Facts, device: u64) -> Result<(), AdmissionRefusal> {
+        if magic != PROC_SUPER_MAGIC || facts.kind != Kind::Symlink || facts.device != device {
+            return Err(AdmissionRefusal::NotAdmitted);
+        }
+        Ok(())
+    }
+
+    /// Strict parser for the kernel-generated `thread-self` target
+    /// `<pid>/task/<tid>`: two canonical decimal numbers in `1..=2147483647`
+    /// (1 to 10 digits, no leading zero, no sign) joined by the exact
+    /// literal `/task/`, nothing else. Any other spelling, including an
+    /// empty or possibly truncated result, is refused (`None`); there is no
+    /// alternative format. The tuple it returns is **not** authority: only
+    /// [`AdmittedSelfLink::read_current_task`] turns it into a
+    /// [`CurrentTask`].
+    fn parse_thread_self(bytes: &[u8]) -> Option<(u32, u32)> {
+        const SEPARATOR: &[u8] = b"/task/";
+        let split = bytes.iter().position(|&byte| byte == b'/')?;
+        let (pid, rest) = bytes.split_at(split);
+        let tid = rest.strip_prefix(SEPARATOR)?;
+        Some((canonical_task_id(pid)?, canonical_task_id(tid)?))
+    }
+
+    fn canonical_task_id(digits: &[u8]) -> Option<u32> {
+        if digits.is_empty() || digits.len() > 10 || digits[0] == b'0' {
+            return None;
+        }
+        let mut value: u64 = 0;
+        for &byte in digits {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            value = value * 10 + u64::from(byte - b'0');
+        }
+        let value = u32::try_from(value).ok()?;
+        (1..=MAX_TASK_ID).contains(&value).then_some(value)
+    }
+
+    macro_rules! opaque_debug {
+        ($($name:ident $(<$life:lifetime>)?),+) => {$(
+            impl std::fmt::Debug for $name $(<$life>)? {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(concat!(stringify!($name), "(..)"))
+                }
+            }
+        )+};
+    }
+
+    /// The constant process root `/`, opened only with the unchanged
+    /// `PROCESS_ROOT_HOW`. Its only use is acquiring a [`CandidateProcRoot`].
+    pub(crate) struct ProcessRoot {
+        fd: Fd,
+    }
+
+    /// The constant `proc` beneath a [`ProcessRoot`], **not** admitted.
+    /// Nothing accepts it except [`CandidateProcRoot::admit`].
+    pub(crate) struct CandidateProcRoot {
+        fd: Fd,
+    }
+
+    /// An admitted procfs root: procfs magic, directory; its device.
+    pub(crate) struct AdmittedProcRoot {
+        fd: Fd,
+        device: u64,
+    }
+
+    /// The not-followed `thread-self` link beneath an admitted root, **not**
+    /// admitted. It borrows that root.
+    pub(crate) struct CandidateSelfLink<'proc> {
+        fd: Fd,
+        proc: &'proc AdmittedProcRoot,
+        _thread: ThreadBound,
+    }
+
+    /// An admitted self link: procfs magic, symlink, the root's device.
+    pub(crate) struct AdmittedSelfLink<'proc> {
+        fd: Fd,
+        proc: &'proc AdmittedProcRoot,
+        _thread: ThreadBound,
+    }
+
+    /// The calling thread's task, as named by the kernel through the
+    /// admitted self link of `proc`, read on this thread. It holds no
+    /// descriptor. It cannot be built from numbers, cloned or sent.
+    pub(crate) struct CurrentTask<'proc> {
+        proc: &'proc AdmittedProcRoot,
+        pid: u32,
+        tid: u32,
+        _thread: ThreadBound,
+    }
+
+    /// The task `fd` directory of a [`CurrentTask`], **not** admitted. It
+    /// keeps its chain's proc device (the root itself may already be
+    /// dropped).
+    pub(crate) struct CandidateFdDir {
+        fd: Fd,
+        device: u64,
+        _thread: ThreadBound,
+    }
+
+    /// An admitted task `fd` directory of the calling thread: procfs magic,
+    /// directory, its chain's device. The only directory the readable leaf
+    /// accepts.
+    pub(crate) struct AdmittedFdDir {
+        fd: Fd,
+        _thread: ThreadBound,
+    }
+
+    /// A genuine pin that passed the S0 sample (regular file, pinned
+    /// identity, `nlink == 1`) when this value was minted. It borrows the
+    /// pin, so the pin's descriptor number stays bound to the same open
+    /// description for as long as this value lives. The only source the
+    /// readable leaf accepts.
+    pub(crate) struct AdmittedRegularSource<'pin> {
+        pinned: &'pin Pinned,
+    }
+
+    opaque_debug!(
+        ProcessRoot,
+        CandidateProcRoot,
+        AdmittedProcRoot,
+        CandidateSelfLink<'_>,
+        AdmittedSelfLink<'_>,
+        CurrentTask<'_>,
+        CandidateFdDir,
+        AdmittedFdDir,
+        AdmittedRegularSource<'_>
+    );
+
+    impl ProcessRoot {
+        /// One attempt: the constant absolute "/" with `AT_FDCWD` and the
+        /// unchanged `PROCESS_ROOT_HOW` (mask 0x07).
+        pub(crate) fn open() -> Result<Self, i32> {
+            openat2_process_root(&PROCESS_ROOT_HOW).map(|fd| Self { fd })
+        }
+
+        /// One attempt: the constant name `proc` beneath this root (mask
+        /// 0x0E).
+        pub(crate) fn open_proc(&self) -> Result<CandidateProcRoot, i32> {
+            openat2_once(self.fd.raw(), c"proc", &PROC_MOUNT_HOW).map(|fd| CandidateProcRoot { fd })
+        }
+    }
+
+    impl CandidateProcRoot {
+        /// Admits this handle as procfs (magic `0x9FA0`, directory). The
+        /// candidate is consumed; on refusal its descriptor is closed.
+        pub(crate) fn admit(self) -> Result<AdmittedProcRoot, AdmissionRefusal> {
+            let magic = filesystem_magic(&self.fd);
+            let facts = facts(self.fd.metadata());
+            let device = directory_verdict(magic, facts, None)?;
+            Ok(AdmittedProcRoot {
+                fd: self.fd,
+                device,
+            })
+        }
+    }
+
+    impl AdmittedProcRoot {
+        /// One attempt: the constant name `thread-self` beneath this
+        /// admitted root, not followed (full mask).
+        pub(crate) fn open_thread_self(&self) -> Result<CandidateSelfLink<'_>, i32> {
+            openat2_once(self.fd.raw(), c"thread-self", &PROC_SELF_LINK_HOW).map(|fd| {
+                CandidateSelfLink {
+                    fd,
+                    proc: self,
+                    _thread: PhantomData,
+                }
+            })
+        }
+    }
+
+    impl<'proc> CandidateSelfLink<'proc> {
+        /// Admits this handle as a procfs symlink on its root's device.
+        /// Magic is sampled first; metadata only after it succeeded.
+        pub(crate) fn admit(self) -> Result<AdmittedSelfLink<'proc>, AdmissionRefusal> {
+            let magic = filesystem_magic(&self.fd).map_err(AdmissionRefusal::Errno)?;
+            let facts = facts(self.fd.metadata())?;
+            link_verdict(magic, facts, self.proc.device)?;
+            Ok(AdmittedSelfLink {
+                fd: self.fd,
+                proc: self.proc,
+                _thread: PhantomData,
+            })
+        }
+    }
+
+    impl<'proc> AdmittedSelfLink<'proc> {
+        /// One direct `readlinkat` of this admitted link (no retry here),
+        /// then the strict canonical parse. The payload is dropped here and
+        /// never stored or printed.
+        pub(crate) fn read_current_task(&self) -> Result<CurrentTask<'proc>, TaskRefusal> {
+            let bytes: SelfLinkBytes = read_self_link(&self.fd).map_err(TaskRefusal::Link)?;
+            let (pid, tid) = parse_thread_self(bytes.as_bytes()).ok_or(TaskRefusal::Malformed)?;
+            Ok(CurrentTask {
+                proc: self.proc,
+                pid,
+                tid,
+                _thread: PhantomData,
+            })
+        }
+    }
+
+    impl CurrentTask<'_> {
+        /// One attempt: `<pid>/task/<tid>/fd` formatted here from this task,
+        /// beneath **this task's own** admitted root (full mask).
+        pub(crate) fn open_fd_dir(&self) -> Result<CandidateFdDir, i32> {
+            let name = task_fd_dir_name(self.pid, self.tid).ok_or(super::EINVAL)?;
+            let path = name.as_c_str().ok_or(super::EINVAL)?;
+            openat2_once(self.proc.fd.raw(), path, &PROC_FD_DIR_HOW).map(|fd| CandidateFdDir {
+                fd,
+                device: self.proc.device,
+                _thread: PhantomData,
+            })
+        }
+    }
+
+    impl CandidateFdDir {
+        /// Admits this handle as a procfs directory on its chain's device.
+        pub(crate) fn admit(self) -> Result<AdmittedFdDir, AdmissionRefusal> {
+            let magic = filesystem_magic(&self.fd);
+            let facts = facts(self.fd.metadata());
+            directory_verdict(magic, facts, Some(self.device))?;
+            Ok(AdmittedFdDir {
+                fd: self.fd,
+                _thread: PhantomData,
+            })
+        }
+    }
+
+    impl<'pin> AdmittedRegularSource<'pin> {
+        /// S0: the existing `Pinned::reinspect` sample of the held handle
+        /// (regular file, pinned identity, `nlink == 1`), exactly once.
+        pub(crate) fn admit(pinned: &'pin Pinned) -> Result<Self, AccessError> {
+            pinned.reinspect()?;
+            Ok(Self { pinned })
+        }
+    }
+
+    impl AdmittedFdDir {
+        /// One attempt: opens the generated decimal leaf of the admitted
+        /// source's still-owned descriptor beneath this admitted directory,
+        /// with the fixed `O_RDONLY|O_CLOEXEC|O_NONBLOCK`, mode 0, resolve 0.
+        ///
+        /// The leaf name is formatted here from the source's own descriptor
+        /// number (at most ten digits, no `/`); it never comes from a
+        /// caller, a string or a `readlink` of the descriptor. The source is
+        /// borrowed for the whole call, so that number stays bound to the
+        /// same open description. The kernel follows the fd entry's magic
+        /// link to the object held by the pin, not to any pathname.
+        pub(crate) fn open_readable(
+            &self,
+            source: &AdmittedRegularSource<'_>,
+        ) -> Result<ReadableFd, i32> {
+            let number = u32::try_from(source.pinned.handle().raw()).map_err(|_| super::EINVAL)?;
+            let mut name = ProcName::new();
+            name.decimal(number).ok_or(super::EINVAL)?;
+            let leaf = name.as_c_str().ok_or(super::EINVAL)?;
+            let owned = openat2_owned(self.fd.raw(), leaf, &PROC_FD_LEAF_HOW)?;
+            Ok(ReadableFd {
+                file: File::from(owned),
+            })
+        }
+    }
+
+    /// Inline control storage of one admission chain, checked against the
+    /// 4096-byte ceiling. No admission value allocates.
+    const CONTROL_BYTES: usize = size_of::<ProcessRoot>()
+        + size_of::<CandidateProcRoot>()
+        + size_of::<AdmittedProcRoot>()
+        + size_of::<CandidateSelfLink<'static>>()
+        + size_of::<AdmittedSelfLink<'static>>()
+        + size_of::<CurrentTask<'static>>()
+        + size_of::<CandidateFdDir>()
+        + size_of::<AdmittedFdDir>()
+        + size_of::<AdmittedRegularSource<'static>>()
+        + size_of::<SelfLinkBytes>()
+        + size_of::<ProcName>()
+        + size_of::<ProcName>();
+
+    const _: () = assert!(CONTROL_BYTES <= 4096);
+
+    // Compile-time proof that the thread-bound values are neither `Send`
+    // nor `Sync`: if one of them implemented the trait, both blanket impls
+    // would apply and the `_` below would be ambiguous (a compile error).
+    trait AmbiguousIfSend<A> {
+        fn check() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+    impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+
+    trait AmbiguousIfSync<A> {
+        fn check() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+    impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
+
+    const _: fn() = || {
+        <CandidateSelfLink<'static> as AmbiguousIfSend<_>>::check();
+        <AdmittedSelfLink<'static> as AmbiguousIfSend<_>>::check();
+        <CurrentTask<'static> as AmbiguousIfSend<_>>::check();
+        <CandidateFdDir as AmbiguousIfSend<_>>::check();
+        <AdmittedFdDir as AmbiguousIfSend<_>>::check();
+        <CandidateSelfLink<'static> as AmbiguousIfSync<_>>::check();
+        <AdmittedSelfLink<'static> as AmbiguousIfSync<_>>::check();
+        <CurrentTask<'static> as AmbiguousIfSync<_>>::check();
+        <CandidateFdDir as AmbiguousIfSync<_>>::check();
+        <AdmittedFdDir as AmbiguousIfSync<_>>::check();
+    };
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // -- canonical task grammar (pure) ---------------------------------
+
+        #[test]
+        fn accepts_only_canonical_kernel_spelling() {
+            assert_eq!(parse_thread_self(b"1/task/1"), Some((1, 1)));
+            assert_eq!(
+                parse_thread_self(b"651101/task/651102"),
+                Some((651_101, 651_102))
+            );
+            assert_eq!(
+                parse_thread_self(b"2147483647/task/2147483647"),
+                Some((2_147_483_647, 2_147_483_647))
+            );
+        }
+
+        #[test]
+        fn refuses_every_other_spelling() {
+            let refused: &[&[u8]] = &[
+                b"",
+                b"/",
+                b"self",
+                b"thread-self",
+                b"12",
+                b"12/task",
+                b"12/task/",
+                b"/task/12",
+                b"12/task/12/",
+                b"12/task/12/fd",
+                b"12/task//12",
+                b"12//task/12",
+                b"12/tasks/12",
+                b"12/TASK/12",
+                b"012/task/12",
+                b"12/task/012",
+                b"00/task/12",
+                b"0/task/12",
+                b"12/task/0",
+                b"0/task/0",
+                b"-1/task/12",
+                b"12/task/-1",
+                b"+1/task/12",
+                b"12/task/+1",
+                b" 12/task/12",
+                b"12/task/12 ",
+                b"12/task/12\n",
+                b"12/task/12\0",
+                b"12/task/1\x002",
+                b"1\x00/task/12",
+                b"./12/task/12",
+                b"../12/task/12",
+                b"12/task/../12",
+                b"2147483648/task/1",
+                b"1/task/2147483648",
+                b"4294967295/task/1",
+                b"4294967296/task/1",
+                b"9999999999/task/1",
+                b"12345678901/task/1",
+                b"1/task/99999999999",
+                b"99999999999999999999/task/1",
+                b"\xd9\xa1/task/1",
+                b"0x1/task/1",
+                b"1e3/task/1",
+            ];
+            for spelling in refused {
+                assert_eq!(parse_thread_self(spelling), None, "{spelling:?}");
+            }
+        }
+
+        #[test]
+        fn truncated_or_full_buffer_link_results_are_refused() {
+            assert_eq!(
+                super::super::self_link_result([b'1'; 32], 32).err(),
+                Some(LinkReadError::Truncated)
+            );
+            assert_eq!(
+                super::super::self_link_result([b'1'; 32], 33).err(),
+                Some(LinkReadError::Truncated)
+            );
+            assert_eq!(
+                super::super::self_link_result([b'1'; 32], -1).err(),
+                Some(LinkReadError::Errno(0))
+            );
+            let mut buf = [0_u8; 32];
+            buf[..8].copy_from_slice(b"1/task/1");
+            let ok = super::super::self_link_result(buf, 8).unwrap();
+            assert_eq!(ok.as_bytes(), b"1/task/1");
+        }
+
+        // -- admission verdicts (pure: synthetic facts, not kernel evidence) --
+
+        const PROC: i64 = PROC_SUPER_MAGIC;
+        const DIR: Facts = Facts {
+            kind: Kind::Directory,
+            device: 23,
+        };
+        const LINK: Facts = Facts {
+            kind: Kind::Symlink,
+            device: 23,
+        };
+
+        #[test]
+        fn directory_admission_checks_magic_type_and_device_in_order() {
+            assert_eq!(directory_verdict(Ok(PROC), Ok(DIR), None), Ok(23));
+            assert_eq!(directory_verdict(Ok(PROC), Ok(DIR), Some(23)), Ok(23));
+            let refused = Err(AdmissionRefusal::NotAdmitted);
+            for magic in [0xEF53_i64, 0x0102_1994, 0, -1, PROC + 1] {
+                assert_eq!(directory_verdict(Ok(magic), Ok(DIR), None), refused);
+            }
+            for kind in [Kind::Symlink, Kind::Other] {
+                let facts = Facts { kind, device: 23 };
+                assert_eq!(directory_verdict(Ok(PROC), Ok(facts), None), refused);
+            }
+            assert_eq!(directory_verdict(Ok(PROC), Ok(DIR), Some(24)), refused);
+            // The magic sample wins over every later problem.
+            assert_eq!(
+                directory_verdict(Err(13), Err(AdmissionRefusal::Errno(2)), Some(9)),
+                Err(AdmissionRefusal::Errno(13))
+            );
+            assert_eq!(
+                directory_verdict(Ok(0), Err(AdmissionRefusal::Errno(2)), None),
+                refused
+            );
+            assert_eq!(
+                directory_verdict(Ok(PROC), Err(AdmissionRefusal::Errno(2)), None),
+                Err(AdmissionRefusal::Errno(2))
+            );
+        }
+
+        #[test]
+        fn link_admission_checks_magic_type_and_device() {
+            assert_eq!(link_verdict(PROC, LINK, 23), Ok(()));
+            let refused = Err(AdmissionRefusal::NotAdmitted);
+            assert_eq!(link_verdict(0xEF53, LINK, 23), refused);
+            assert_eq!(link_verdict(PROC, DIR, 23), refused);
+            let other = Facts {
+                kind: Kind::Other,
+                device: 23,
+            };
+            assert_eq!(link_verdict(PROC, other, 23), refused);
+            assert_eq!(link_verdict(PROC, LINK, 24), refused);
+        }
+
+        #[test]
+        fn metadata_errors_keep_their_errno() {
+            let with_errno = facts(Err(io::Error::from_raw_os_error(13)));
+            assert_eq!(with_errno, Err(AdmissionRefusal::Errno(13)));
+            let without = facts(Err(io::Error::other("no errno")));
+            assert_eq!(without, Err(AdmissionRefusal::NotAdmitted));
+        }
+
+        // -- bounded controls ------------------------------------------------
+
+        #[test]
+        fn admission_controls_are_small_and_inline() {
+            // CONTROL_BYTES <= 4096 is a compile-time assertion above.
+            // Task tokens hold no descriptor: a borrow, two numbers, a ZST.
+            assert_eq!(size_of::<ThreadBound>(), 0);
+            assert!(size_of::<CurrentTask<'static>>() <= 16);
+            assert_eq!(size_of::<AdmittedRegularSource<'static>>(), 8);
+            eprintln!("ABF26-ADMISSION control bytes: {CONTROL_BYTES}");
+            for (name, bytes) in [
+                ("ProcessRoot", size_of::<ProcessRoot>()),
+                ("CandidateProcRoot", size_of::<CandidateProcRoot>()),
+                ("AdmittedProcRoot", size_of::<AdmittedProcRoot>()),
+                ("CandidateSelfLink", size_of::<CandidateSelfLink<'static>>()),
+                ("AdmittedSelfLink", size_of::<AdmittedSelfLink<'static>>()),
+                ("CurrentTask", size_of::<CurrentTask<'static>>()),
+                ("CandidateFdDir", size_of::<CandidateFdDir>()),
+                ("AdmittedFdDir", size_of::<AdmittedFdDir>()),
+                (
+                    "AdmittedRegularSource",
+                    size_of::<AdmittedRegularSource<'static>>(),
+                ),
+                ("SelfLinkBytes", size_of::<SelfLinkBytes>()),
+                ("ProcName", size_of::<ProcName>()),
+            ] {
+                eprintln!("ABF26-ADMISSION size {name}: {bytes}");
+            }
+        }
+
+        // -- native chain on the real kernel (no harness, real procfs) -------
+
+        /// Native: the whole chain on this thread. The task is the one the
+        /// kernel names for this thread; the independent expected value is
+        /// std's view of `/proc/thread-self` and this process id.
+        #[test]
+        fn native_chain_admits_this_threads_task() {
+            let expected = std::fs::read_link("/proc/thread-self").unwrap();
+            let process = ProcessRoot::open().unwrap();
+            let candidate = process.open_proc().unwrap();
+            drop(process);
+            let proc = candidate.admit().unwrap();
+            let dir = {
+                let link = proc.open_thread_self().unwrap().admit().unwrap();
+                let task = link.read_current_task().unwrap();
+                drop(link);
+                assert_eq!(task.pid, std::process::id());
+                assert_eq!(
+                    expected.to_str().unwrap(),
+                    format!("{}/task/{}", task.pid, task.tid)
+                );
+                task.open_fd_dir().unwrap()
+            };
+            drop(proc);
+            dir.admit().unwrap();
+        }
+
+        /// Native: a different thread names a different task through its own
+        /// fresh chain (no cache, no shared token).
+        #[test]
+        fn each_thread_gets_its_own_task() {
+            fn own_task() -> (u32, u32) {
+                let process = ProcessRoot::open().unwrap();
+                let proc = process.open_proc().unwrap().admit().unwrap();
+                let link = proc.open_thread_self().unwrap().admit().unwrap();
+                let task = link.read_current_task().unwrap();
+                (task.pid, task.tid)
+            }
+            let here = own_task();
+            let there = std::thread::spawn(own_task).join().unwrap();
+            assert_eq!(here.0, there.0, "same process");
+            assert_ne!(here.1, there.1, "different calling threads");
+            assert_eq!(own_task(), here, "fresh chain, same thread");
+        }
+
+        /// Native: the process root is not procfs, so a candidate opened
+        /// with the proc mount `open_how` beneath it would never be admitted
+        /// as procfs; checked through the same verdict on the real `/`.
+        #[test]
+        fn native_process_root_is_not_admitted_as_procfs() {
+            let process = ProcessRoot::open().unwrap();
+            let verdict = directory_verdict(
+                filesystem_magic(&process.fd),
+                facts(process.fd.metadata()),
+                None,
+            );
+            assert_eq!(verdict, Err(AdmissionRefusal::NotAdmitted));
+        }
+
+        /// Native: the generic `Fd` open paths cannot become an alternative
+        /// readable leaf. With the relaxed leaf `open_how` (no `O_PATH`) they
+        /// refuse with `EINVAL` before any system call, so the only readable
+        /// procfs open is [`AdmittedFdDir::open_readable`].
+        #[test]
+        fn generic_open_paths_refuse_the_readable_leaf_how() {
+            let process = ProcessRoot::open().unwrap();
+            assert_eq!(
+                super::super::openat2_beneath(&process.fd, c"proc", &PROC_FD_LEAF_HOW).err(),
+                Some(super::super::EINVAL)
+            );
+            assert_eq!(
+                super::super::openat2_process_root(&PROC_FD_LEAF_HOW).err(),
+                Some(super::super::EINVAL)
+            );
+        }
+
+        /// Injected (harness override of `fstatfs`, not kernel evidence): a
+        /// candidate with a non-procfs magic is refused and closed.
+        #[cfg(all(feature = "fault-injection", abf_secure_fs_harness))]
+        #[test]
+        fn injected_non_procfs_magic_refuses_each_candidate() {
+            use super::super::fault;
+            fault::reset();
+            let process = ProcessRoot::open().unwrap();
+            let candidate = process.open_proc().unwrap();
+            fault::set_magic(Some(0xEF53));
+            assert_eq!(
+                candidate.admit().unwrap_err(),
+                AdmissionRefusal::NotAdmitted
+            );
+            fault::set_magic(None);
+            let proc = process.open_proc().unwrap().admit().unwrap();
+            let link = proc.open_thread_self().unwrap();
+            fault::set_magic(Some(0xEF53));
+            assert_eq!(link.admit().unwrap_err(), AdmissionRefusal::NotAdmitted);
+            fault::set_magic(None);
+            let link = proc.open_thread_self().unwrap().admit().unwrap();
+            let dir = link.read_current_task().unwrap().open_fd_dir().unwrap();
+            fault::set_magic(Some(0xEF53));
+            assert_eq!(dir.admit().unwrap_err(), AdmissionRefusal::NotAdmitted);
+            fault::set_magic(None);
+            drop(link);
+            drop(proc);
+            drop(process);
+            let (opened, closed) = fault::counters();
+            assert_eq!(opened, closed, "every candidate closed");
+            fault::reset();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -30,6 +30,16 @@
 //!    same `(dev, ino)` as the pin, `nlink == 1`.
 //! 5. **S2**: reinspect the original handle with the S0 policy.
 //!
+//! Steps 1–3 go through the sealed admission chain of the ABI module
+//! (`sys::linux_x86_64::admission`, F16-1): S0 is the only way to obtain an
+//! admitted source; each procfs handle is a candidate until its own checked
+//! constructor admits it; the task is derived only from the admitted
+//! `thread-self` link and opens its `fd` directory only beneath the same
+//! admitted root; the terminal open accepts only the admitted `fd` directory
+//! and the admitted source. This module cannot build any of those values
+//! itself, pass a generic descriptor or task number, or name the relaxed
+//! `open_how`.
+//!
 //! Any refusal drops the consumed pin and every handle acquired so far. At
 //! most three descriptors coexist during the call (including the original);
 //! success retains exactly two. Retries: proc anchor opens at most three
@@ -46,15 +56,14 @@
 
 use crate::error::AccessError;
 use crate::linux::{
-    Inspection, MAX_OPEN_ATTEMPTS, OpenFailure, PROCESS_ROOT_HOW, Pinned, Target, classify,
-    classify_errno, inspect, open_bounded,
+    Inspection, MAX_OPEN_ATTEMPTS, OpenFailure, Pinned, classify, classify_errno, inspect,
 };
-use crate::sys::linux_x86_64::{
-    self as sys, EAGAIN, EINTR, ENOENT, ENOTDIR, LinkReadError, MAX_TASK_ID, PROC_SUPER_MAGIC,
-    ProcFdDir, ProcRoot, ReadableFd,
+use crate::sys::linux_x86_64::admission::{
+    AdmissionRefusal, AdmittedFdDir, AdmittedRegularSource, AdmittedSelfLink, CurrentTask,
+    ProcessRoot, TaskRefusal,
 };
+use crate::sys::linux_x86_64::{EAGAIN, EINTR, ENOENT, ENOTDIR, LinkReadError, ReadableFd};
 use crate::{FileEvidence, ObjectId};
-use std::os::unix::fs::MetadataExt;
 
 /// A readable capability: the consumed original pin (O_PATH) and the new
 /// read-only descriptor of the same object. Both are owned and closed on
@@ -92,13 +101,14 @@ fn held_policy(info: Inspection, expected: ObjectId) -> Result<FileEvidence, Acc
 /// `pinned` is consumed in both cases. On success the returned evidence is
 /// the S1 sample of the readable handle.
 pub(crate) fn promote(pinned: Pinned) -> Result<(Readable, FileEvidence), AccessError> {
-    // S0: the original handle, before any procfs work.
-    pinned.reinspect()?;
+    // S0: the original handle, before any procfs work. Its success is the
+    // only way to obtain the admitted source the terminal open accepts.
+    let source = AdmittedRegularSource::admit(&pinned)?;
     schedule_point!(PromoteAfterS0);
 
     let fd_dir = acquire_thread_fd_dir()?;
     schedule_point!(PromoteBeforeOpen);
-    let readable = open_leaf(&fd_dir, &pinned)?;
+    let readable = open_leaf(&fd_dir, &source)?;
     drop(fd_dir);
     schedule_point!(PromoteAfterOpen);
 
@@ -137,8 +147,13 @@ fn classify_proc(failure: OpenFailure) -> AccessError {
 }
 
 /// Initial attempt plus at most two retries after `EAGAIN`/`EINTR`, with
-/// the identical constant parameters (the closures take none).
-fn proc_open_bounded<T>(mut attempt: impl FnMut() -> Result<T, i32>) -> Result<T, AccessError> {
+/// the identical constant parameters (the closures take none). `classify`
+/// maps any other errno: the unchanged process-root mapping for `/`, the
+/// proc-phase mapping for every procfs open.
+fn open_bounded<T>(
+    mut attempt: impl FnMut() -> Result<T, i32>,
+    classify: fn(OpenFailure) -> AccessError,
+) -> Result<T, AccessError> {
     let mut attempts = 0;
     loop {
         attempts += 1;
@@ -146,124 +161,67 @@ fn proc_open_bounded<T>(mut attempt: impl FnMut() -> Result<T, i32>) -> Result<T
             Ok(value) => return Ok(value),
             Err(EAGAIN | EINTR) if attempts < MAX_OPEN_ATTEMPTS => {}
             Err(EAGAIN | EINTR) => return Err(AccessError::RetryExhausted),
-            Err(errno) => return Err(classify_proc(OpenFailure::Errno(errno))),
+            Err(errno) => return Err(classify(OpenFailure::Errno(errno))),
         }
     }
 }
 
-/// Admits a procfs directory by handle: procfs magic, directory, and (when
-/// given) the admitted proc device. Returns its device.
-fn admit_proc_directory(
-    magic: Result<i64, i32>,
-    metadata: std::io::Result<std::fs::Metadata>,
-    device: Option<u64>,
-) -> Result<u64, AccessError> {
-    let magic = magic.map_err(|errno| classify_proc(OpenFailure::Errno(errno)))?;
-    if magic != PROC_SUPER_MAGIC {
-        return Err(AccessError::SecurePrimitiveUnavailable);
+/// A refused admission sample: an errno from `fstatfs`/`statx` keeps the
+/// proc-phase mapping; wrong magic, type or device is unavailable procfs.
+fn refused(refusal: AdmissionRefusal) -> AccessError {
+    match refusal {
+        AdmissionRefusal::Errno(errno) => classify_proc(OpenFailure::Errno(errno)),
+        AdmissionRefusal::NotAdmitted => AccessError::SecurePrimitiveUnavailable,
     }
-    let metadata = metadata_or_code(metadata)?;
-    if !metadata.file_type().is_dir() {
-        return Err(AccessError::SecurePrimitiveUnavailable);
-    }
-    if device.is_some_and(|device| device != metadata.dev()) {
-        return Err(AccessError::SecurePrimitiveUnavailable);
-    }
-    Ok(metadata.dev())
 }
 
-fn metadata_or_code(
-    metadata: std::io::Result<std::fs::Metadata>,
-) -> Result<std::fs::Metadata, AccessError> {
-    metadata.map_err(|error| match error.raw_os_error() {
-        Some(errno) => classify_proc(OpenFailure::Errno(errno)),
-        None => AccessError::SecurePrimitiveUnavailable,
-    })
-}
-
-/// Acquires and admits this thread's procfs `fd` directory. Every handle
+/// Acquires and admits this thread's procfs `fd` directory through the
+/// sealed admission chain (`sys::linux_x86_64::admission`). Every handle
 /// except the returned directory is dropped before return (and on error).
-fn acquire_thread_fd_dir() -> Result<ProcFdDir, AccessError> {
-    use sys::HandleMetadata;
-
-    let anchor = open_bounded(Target::ProcessRoot, &PROCESS_ROOT_HOW).map_err(classify)?;
-    let proc_root: ProcRoot = proc_open_bounded(|| sys::open_proc_root(&anchor))?;
+/// At most two of these handles are open at once, plus the caller's pin.
+fn acquire_thread_fd_dir() -> Result<AdmittedFdDir, AccessError> {
+    let anchor = open_bounded(ProcessRoot::open, classify)?;
+    let candidate = open_bounded(|| anchor.open_proc(), classify_proc)?;
     drop(anchor);
-    let proc_device =
-        admit_proc_directory(proc_root.filesystem_magic(), proc_root.metadata(), None)?;
+    let proc_root = candidate.admit().map_err(refused)?;
 
-    let (pid, tid) = {
-        let link = proc_open_bounded(|| sys::open_thread_self(&proc_root))?;
-        let magic = link
-            .filesystem_magic()
-            .map_err(|errno| classify_proc(OpenFailure::Errno(errno)))?;
-        let metadata = metadata_or_code(link.metadata())?;
-        if magic != PROC_SUPER_MAGIC
-            || !metadata.file_type().is_symlink()
-            || metadata.dev() != proc_device
-        {
-            return Err(AccessError::SecurePrimitiveUnavailable);
-        }
-        let bytes = read_self_link_bounded(&link)?;
-        parse_thread_self(bytes.as_bytes()).ok_or(AccessError::SecurePrimitiveUnavailable)?
-        // `link` and the payload are dropped here; the payload is never
-        // stored or printed.
+    let candidate = {
+        let task = {
+            let link = open_bounded(|| proc_root.open_thread_self(), classify_proc)?
+                .admit()
+                .map_err(refused)?;
+            read_current_task_bounded(&link)?
+            // `link` and the payload are dropped here; the payload is never
+            // stored or printed.
+        };
+        open_bounded(|| task.open_fd_dir(), classify_proc)?
     };
-
-    let fd_dir = proc_open_bounded(|| sys::open_task_fd_dir(&proc_root, pid, tid))?;
     drop(proc_root);
-    admit_proc_directory(
-        fd_dir.filesystem_magic(),
-        fd_dir.metadata(),
-        Some(proc_device),
-    )?;
-    Ok(fd_dir)
+    candidate.admit().map_err(refused)
 }
 
 /// At most three `readlinkat` attempts, retrying only `EINTR`.
-fn read_self_link_bounded(link: &sys::ProcSelfLink) -> Result<sys::SelfLinkBytes, AccessError> {
+fn read_current_task_bounded<'proc>(
+    link: &AdmittedSelfLink<'proc>,
+) -> Result<CurrentTask<'proc>, AccessError> {
     let mut attempts = 0;
     loop {
         attempts += 1;
-        match sys::read_self_link(link) {
-            Ok(bytes) => return Ok(bytes),
-            Err(LinkReadError::Errno(EINTR)) if attempts < MAX_OPEN_ATTEMPTS => {}
-            Err(LinkReadError::Errno(EINTR)) => return Err(AccessError::RetryExhausted),
-            Err(LinkReadError::Truncated) => return Err(AccessError::SecurePrimitiveUnavailable),
-            Err(LinkReadError::Errno(errno)) => {
+        match link.read_current_task() {
+            Ok(task) => return Ok(task),
+            Err(TaskRefusal::Link(LinkReadError::Errno(EINTR))) if attempts < MAX_OPEN_ATTEMPTS => {
+            }
+            Err(TaskRefusal::Link(LinkReadError::Errno(EINTR))) => {
+                return Err(AccessError::RetryExhausted);
+            }
+            Err(TaskRefusal::Link(LinkReadError::Truncated) | TaskRefusal::Malformed) => {
+                return Err(AccessError::SecurePrimitiveUnavailable);
+            }
+            Err(TaskRefusal::Link(LinkReadError::Errno(errno))) => {
                 return Err(classify_proc(OpenFailure::Errno(errno)));
             }
         }
     }
-}
-
-/// Strict parser for the kernel-generated `thread-self` target
-/// `<pid>/task/<tid>`: two canonical decimal numbers in `1..=2147483647`
-/// (1 to 10 digits, no leading zero, no sign) joined by the exact literal
-/// `/task/`, nothing else. Any other spelling, including an empty or
-/// possibly truncated result, is refused (`None`); there is no alternative
-/// format.
-pub(crate) fn parse_thread_self(bytes: &[u8]) -> Option<(u32, u32)> {
-    const SEPARATOR: &[u8] = b"/task/";
-    let split = bytes.iter().position(|&byte| byte == b'/')?;
-    let (pid, rest) = bytes.split_at(split);
-    let tid = rest.strip_prefix(SEPARATOR)?;
-    Some((canonical_task_id(pid)?, canonical_task_id(tid)?))
-}
-
-fn canonical_task_id(digits: &[u8]) -> Option<u32> {
-    if digits.is_empty() || digits.len() > 10 || digits[0] == b'0' {
-        return None;
-    }
-    let mut value: u64 = 0;
-    for &byte in digits {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        value = value * 10 + u64::from(byte - b'0');
-    }
-    let value = u32::try_from(value).ok()?;
-    (1..=MAX_TASK_ID).contains(&value).then_some(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -272,12 +230,16 @@ fn canonical_task_id(digits: &[u8]) -> Option<u32> {
 
 /// At most three attempts, retrying only `EINTR`. `EAGAIN`/`EWOULDBLOCK` is
 /// terminal and is never retried. A missing fd entry means procfs support is
-/// unavailable; there is no fallback.
-fn open_leaf(fd_dir: &ProcFdDir, pinned: &Pinned) -> Result<ReadableFd, AccessError> {
+/// unavailable; there is no fallback. Only an admitted `fd` directory and an
+/// admitted source can reach the relaxed open.
+fn open_leaf(
+    fd_dir: &AdmittedFdDir,
+    source: &AdmittedRegularSource<'_>,
+) -> Result<ReadableFd, AccessError> {
     let mut attempts = 0;
     loop {
         attempts += 1;
-        match sys::open_readable_leaf(fd_dir, pinned.handle()) {
+        match fd_dir.open_readable(source) {
             Ok(readable) => return Ok(readable),
             Err(EAGAIN) => return Err(AccessError::PromotionWouldBlock),
             Err(EINTR) if attempts < MAX_OPEN_ATTEMPTS => {}
@@ -361,66 +323,5 @@ impl Readable {
 
     pub(crate) fn seek_to(&self, to: u64) -> Result<u64, i32> {
         self.readable.seek_to(to)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_thread_self;
-
-    #[test]
-    fn accepts_only_canonical_kernel_spelling() {
-        assert_eq!(parse_thread_self(b"1/task/1"), Some((1, 1)));
-        assert_eq!(
-            parse_thread_self(b"651101/task/651102"),
-            Some((651_101, 651_102))
-        );
-        assert_eq!(
-            parse_thread_self(b"2147483647/task/2147483647"),
-            Some((2_147_483_647, 2_147_483_647))
-        );
-    }
-
-    #[test]
-    fn refuses_every_other_spelling() {
-        let refused: &[&[u8]] = &[
-            b"",
-            b"/",
-            b"self",
-            b"thread-self",
-            b"12",
-            b"12/task",
-            b"12/task/",
-            b"/task/12",
-            b"12/task/12/",
-            b"12/task/12/fd",
-            b"12/task//12",
-            b"12//task/12",
-            b"12/tasks/12",
-            b"12/TASK/12",
-            b"012/task/12",
-            b"12/task/012",
-            b"0/task/12",
-            b"12/task/0",
-            b"-1/task/12",
-            b"+1/task/12",
-            b" 12/task/12",
-            b"12/task/12 ",
-            b"12/task/12\n",
-            b"12/task/1\x002",
-            b"1\x00/task/12",
-            b"./12/task/12",
-            b"../12/task/12",
-            b"12/task/../12",
-            b"2147483648/task/1",
-            b"1/task/2147483648",
-            b"4294967296/task/1",
-            b"12345678901/task/1",
-            b"1/task/99999999999",
-            b"\xd9\xa1/task/1",
-        ];
-        for spelling in refused {
-            assert_eq!(parse_thread_self(spelling), None, "{spelling:?}");
-        }
     }
 }

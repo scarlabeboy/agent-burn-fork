@@ -129,6 +129,27 @@ fn status_vocabulary_has_no_complete_state() {
     assert_eq!(ends.len(), 6);
 }
 
+/// F18-6/F19-3 vocabulary: a cancellation observed before the first attempt
+/// is a coded refusal (`EnumerationError::Cancelled`, no listing), distinct
+/// from a released listing whose stream ended `StreamEnd::Cancelled` (always
+/// `Partial`, possibly empty). Child refusals have their own codes and are
+/// not enumeration cancellations.
+#[test]
+fn cancellation_refusal_and_cancelled_listing_are_distinct() {
+    let refusal = EnumerationError::Cancelled;
+    assert_eq!(refusal.to_string(), "enumeration cancelled");
+    assert_ne!(format!("{refusal:?}"), format!("{:?}", StreamEnd::Eof));
+    assert_ne!(StreamEnd::Cancelled, StreamEnd::Eof);
+    for child_refusal in [
+        EnumerationError::OrdinalOutOfRange,
+        EnumerationError::DirectoryBindingChanged,
+        EnumerationError::Access(AccessError::NotFound),
+    ] {
+        assert_ne!(child_refusal, refusal);
+        assert!(!child_refusal.to_string().contains("cancel"));
+    }
+}
+
 #[test]
 fn diagnostics_of_public_values_are_bounded() {
     let text = format!(

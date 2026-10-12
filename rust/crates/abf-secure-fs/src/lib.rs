@@ -25,15 +25,23 @@
 //!   a [`DirectoryListing`]. Names stay private: candidates are opaque
 //!   ordinals, and [`DirectoryListing::pin_regular`] authorizes one of them
 //!   **afresh** through [`SecureRoot::pin_regular`]'s root-relative protocol.
-//!   Discovery is not authorization, and no content is read. See
-//!   `README.md`, "Directory enumeration".
+//!   Discovery is not authorization, and no content is read. The pinned
+//!   child is the object acquired at that request, not necessarily the
+//!   discovered entry, and may already be outside the root when it is
+//!   returned (see "Authority of a held object" below). See `README.md`,
+//!   "Directory enumeration".
 //! - **Readable promotion (M2A.2a):** [`PinnedRegularFile::promote`]
 //!   consumes a pin and returns a [`ReadableRegularFile`] that owns the
 //!   original `O_PATH` handle **and** a new read-only descriptor of the
 //!   **same** object, reopened through a private per-call procfs anchor of
-//!   the current thread (never through a pathname of the file). The default
-//!   API exposes no way to read bytes; only the two-key test harness has a
-//!   bounded synthetic read. See `README.md`, "Readable promotion".
+//!   the current thread (never through a pathname of the file). Internally,
+//!   that relaxed procfs open accepts only a checked source pin and an
+//!   admitted per-call `fd` directory derived from this calling thread's
+//!   admitted kernel `thread-self` link; candidate directories, generic
+//!   descriptors and arbitrary task numbers cannot be supplied (sealed
+//!   private types, F16-1). The default API exposes no way to read bytes;
+//!   only the two-key test harness has a bounded synthetic read. See
+//!   `README.md`, "Readable promotion".
 //! - **Confinement comes from the kernel:** every resolution of a source
 //!   path beneath a held directory (root, binding checks, file and
 //!   directory pins, the directory self-open) uses `openat2` with the
@@ -49,6 +57,17 @@
 //!   refused. A transient rename restored between checks is not guaranteed
 //!   to be detected. Continuous path membership is **not** claimed, and
 //!   nothing here establishes where file contents came from.
+//! - **Authority of a held object (A23-2):** a pin holds the admissible
+//!   object that confined resolutions acquired and verified at those
+//!   samples. It can be moved out of the root before the pin is returned
+//!   (even when the surrounding binding checks pass, for example after a
+//!   restored swap), it can differ from a discovered entry and from the
+//!   original directory's lineage, and promotion exercises that held-object
+//!   authority without any root check. Acquisition-time confinement does
+//!   **not** establish continuous membership, authentic origin, immutable
+//!   lineage or content coherence, and it is **not** consent to read bytes:
+//!   the default build has no content API, and any production consent
+//!   policy is undecided.
 //! - No raw descriptors, `File`, `Read`/`Seek` implementations, procfs
 //!   paths, absolute reopen paths or caller-supplied identities cross this
 //!   API. Errors are codes only.
@@ -246,8 +265,10 @@ impl SecureRoot {
     /// Root binding is checked before and after the acquisition **by this
     /// method itself**. Callers do not need to call
     /// [`SecureRoot::check_binding`] for correctness. The returned handle
-    /// keeps the original object; later replacements of the path do not
-    /// affect it.
+    /// keeps the acquired object; later replacements of the path do not
+    /// affect it. The checks are samples: the object may already have been
+    /// moved out of the root before this method returns, and success says
+    /// nothing about where its bytes came from.
     pub fn pin_regular(&self, relative: &RelativePath) -> Result<PinnedRegularFile, AccessError> {
         let (inner, evidence) = self.inner.pin_regular(relative)?;
         Ok(PinnedRegularFile { inner, evidence })
@@ -304,18 +325,33 @@ impl<'root> PinnedDirectory<'root> {
     }
 
     /// One bounded discovery of this single directory. **Consumes the pin**:
-    /// on success the listing keeps it; on refusal it is closed with every
-    /// handle acquired by the call, and no name or counter is returned.
+    /// on success the listing keeps it. A failed enumeration returns **no**
+    /// listing: the pin is closed with every handle acquired by the call,
+    /// every staged candidate is discarded, and no name or counter is
+    /// returned.
     ///
     /// Root and directory binding are checked at the start, after the
     /// private read open, after every `getdents64` attempt and before
     /// release. A binding, system-call, framing or storage refusal discards
-    /// the whole listing. A reached budget or a cancellation observed after
-    /// reading started returns only what was kept, with a `Partial` status.
-    /// Cancellation requested before the call is
-    /// [`EnumerationError::Cancelled`] before anything is allocated or
-    /// opened. There is no cursor, continuation or retry; a new enumeration
-    /// needs a new pin and may repeat or miss entries.
+    /// the whole listing; such a fatal error wins over cancellation.
+    ///
+    /// Cancellation:
+    ///
+    /// - already requested **on entry**: [`EnumerationError::Cancelled`]
+    ///   before any new allocation or read-handle open (the consumed pin is
+    ///   still dropped);
+    /// - first observed later but **before the first** `getdents64`
+    ///   attempt: also [`EnumerationError::Cancelled`], but the listing
+    ///   storage may already have been reserved and the private read handle
+    ///   opened (both are released);
+    /// - observed after any attempt (including an interrupted one), or at
+    ///   release: a checked `Partial` listing with
+    ///   [`StreamEnd::Cancelled`], which may hold **zero** candidates.
+    ///
+    /// Cancellation is polled; it cannot interrupt a system call in
+    /// progress. A reached budget also returns only what was kept, as
+    /// `Partial`. There is no cursor, continuation or retry; a new
+    /// enumeration needs a new pin and may repeat or miss entries.
     pub fn enumerate(
         self,
         budget: EnumerationBudget,
@@ -372,11 +408,26 @@ impl DirectoryListing<'_> {
     /// Authorizes candidate `ordinal` **afresh**: checks root and directory
     /// binding, then pins the joined root-relative path with the unchanged
     /// [`SecureRoot::pin_regular`] protocol from the held **root** (never
-    /// from the directory handle), then checks both bindings again. The
-    /// result is whatever single-link regular file is currently, admissibly
-    /// bound there; nothing ties it to the entry seen during discovery.
+    /// from the directory handle), then checks both bindings again.
     /// Directories, symlinks and special files are refused by that
     /// protocol. No content is read and nothing is promoted.
+    ///
+    /// Authority of the result (A23-2): the pin holds the admissible
+    /// single-link regular file that the two confined resolutions acquired
+    /// and verified beneath the held root **at those samples**. It can
+    /// differ from the entry seen during discovery and from the original
+    /// directory's lineage, and it can already be **outside** the root when
+    /// this method returns, even though the directory checks before and
+    /// after passed (for example when the directory was swapped and
+    /// restored around the pin). Acquisition-time confinement does not
+    /// establish continuous membership, authentic origin, immutable lineage
+    /// or content coherence, and it is not consent to read bytes.
+    ///
+    /// Borrows the listing. A refusal (bad ordinal, binding change, file
+    /// policy, system call) returns **no** pin and leaves this listing
+    /// available; each later request authorizes afresh and can still
+    /// refuse. This differs from [`PinnedDirectory::enumerate`], whose
+    /// failure consumes the pin and returns no listing.
     pub fn pin_regular(&self, ordinal: usize) -> Result<PinnedRegularFile, EnumerationError> {
         let (inner, evidence) = self.inner.pin_regular(ordinal)?;
         Ok(PinnedRegularFile { inner, evidence })
@@ -429,6 +480,14 @@ impl PinnedRegularFile {
     /// The checks are samples, not continuous guarantees, and nothing here
     /// is a content snapshot. Opening for reading can update access times,
     /// generate notifications and break write leases (README).
+    ///
+    /// Promotion exercises the **held-object** authority of the pin: it
+    /// performs no root or path check, so it succeeds for an object moved
+    /// out of the root (A23-2). It does not establish current membership,
+    /// lineage, content origin or consent to read; the default API still
+    /// reads no bytes. Internally, the relaxed procfs open accepts only the
+    /// S0-admitted source and the calling thread's admitted `fd` directory
+    /// (F16-1).
     pub fn promote(self) -> Result<ReadableRegularFile, AccessError> {
         let (inner, evidence) = self.inner.promote()?;
         Ok(ReadableRegularFile { inner, evidence })

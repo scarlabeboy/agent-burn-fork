@@ -1236,6 +1236,102 @@ mod scheduled {
         }
     }
 
+    // -- ABF26: admission chain (F16-1) ----------------------------------------
+
+    /// Native flag log, recorded by the harness state of the thread that
+    /// runs the promotion: pins moved to another thread BEFORE promotion are
+    /// promoted with that thread's own fresh admission chain (five opens and
+    /// one self-link read each, nothing cached between two promotions), and
+    /// nothing is recorded on the thread that created the pins.
+    #[test]
+    fn moved_pins_use_the_new_threads_fresh_admission_chain() {
+        fi::reset();
+        let case = Case::new("abf26_moved_pins");
+        let a = case.file("root/a.abf15-fixture", "object-a");
+        let b = case.file("root/b.abf15-fixture", "object-b");
+        let root = case.authorize();
+        let pin_a = pin(&case, &root, "a.abf15-fixture");
+        let pin_b = pin(&case, &root, "b.abf15-fixture");
+        fi::take_openat2_log();
+        let (inodes, log, reads, live) = within_deadline(move || {
+            fi::reset();
+            let readable_a = pin_a.promote().unwrap();
+            let readable_b = pin_b.promote().unwrap();
+            let counters = fi::fd_counters();
+            let result = (
+                [
+                    readable_a.evidence().object_id().inode(),
+                    readable_b.evidence().object_id().inode(),
+                ],
+                calls(&fi::take_openat2_log()),
+                fi::self_link_reads(),
+                // Opened minus closed on this thread: the two readable
+                // descriptors (the pins were opened on the other thread).
+                counters.opened - counters.closed,
+            );
+            fi::reset();
+            result
+        });
+        assert_eq!(inodes, [a, b]);
+        assert_eq!(log, [PROMOTION_CALLS, PROMOTION_CALLS].concat());
+        assert_eq!(reads, 2);
+        assert_eq!(live, 2);
+        assert!(fi::take_openat2_log().is_empty());
+        assert_eq!(fi::self_link_reads(), 0);
+        fi::reset();
+    }
+
+    /// Harness descriptor accounting (real wraps and closes on this
+    /// thread): a promotion holds at most three descriptors including the
+    /// pin (peak = live before + 2), opens exactly five and closes the four
+    /// procfs handles; success retains exactly the pin and the readable.
+    /// Refusals at S0 and at proc admission (mocked magic) close the pin.
+    #[test]
+    fn promotion_peak_is_three_and_success_retains_two() {
+        let _leaks = LeakCheck::start();
+        let (case, root, pinned, _) = pinned_case("abf26_peak");
+        let before = fi::fd_counters();
+        let live_before = before.opened - before.closed;
+        assert_eq!(live_before, 3, "root (2) + pin");
+        fi::reset_peak_descriptors();
+        let readable = pinned.promote().unwrap();
+        let after = fi::fd_counters();
+        assert_eq!(after.opened - before.opened, 5);
+        assert_eq!(after.closed - before.closed, 4);
+        assert_eq!(fi::peak_open_descriptors(), live_before + 2);
+        assert_eq!(after.opened - after.closed, 4, "root (2) + pin + readable");
+        drop(readable);
+        let dropped = fi::fd_counters();
+        assert_eq!(dropped.opened - dropped.closed, 2, "only the root remains");
+
+        // S0 refusal: nothing opened, the consumed pin closed.
+        let pinned = pin(&case, &root, "f.abf15-fixture");
+        link_alias(&paths(&case));
+        let before = fi::fd_counters();
+        assert_eq!(pinned.promote().unwrap_err(), AccessError::MultipleLinks);
+        let after = fi::fd_counters();
+        assert_eq!(
+            (after.opened, after.closed),
+            (before.opened, before.closed + 1)
+        );
+        unlink_alias(&paths(&case));
+
+        // Mocked proc admission refusal: two opens, both closed, pin closed.
+        let pinned = pin(&case, &root, "f.abf15-fixture");
+        let before = fi::fd_counters();
+        let reads_before = fi::self_link_reads();
+        fi::inject_filesystem_magic(Some(0xEF53));
+        assert_eq!(
+            pinned.promote().unwrap_err(),
+            AccessError::SecurePrimitiveUnavailable
+        );
+        fi::inject_filesystem_magic(None);
+        let after = fi::fd_counters();
+        assert_eq!(after.opened - before.opened, 2);
+        assert_eq!(after.closed - before.closed, 3);
+        assert_eq!(fi::self_link_reads(), reads_before, "no self-link read");
+    }
+
     // -- unwinding ---------------------------------------------------------------
 
     /// Scheduled panic after the readable open: unwinding closes everything

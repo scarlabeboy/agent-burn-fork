@@ -160,13 +160,25 @@ impl From<PathError> for AccessError {
 
 /// Coded refusal of a directory enumeration (M2A.2b) or of the
 /// authorization of one discovered child. Like [`AccessError`], no variant
-/// carries a name, a path, an OS message or caller text. A refusal never
-/// comes with candidates: the whole listing is discarded.
+/// carries a name, a path, an OS message or caller text.
+///
+/// The two operations fail differently:
+///
+/// - a failed `PinnedDirectory::enumerate` has **consumed** the directory
+///   pin, returns **no** listing and discards every staged candidate;
+/// - a failed `DirectoryListing::pin_regular` returns **no** child pin, only
+///   **borrows** the listing and leaves it available; a later request
+///   authorizes afresh (and can still refuse).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum EnumerationError {
-    /// Cancellation was requested before any entry was read. Requested on
-    /// entry, nothing was allocated or opened.
+    /// Cancellation was observed before the first `getdents64` attempt.
+    /// If it was already requested on entry, nothing new was allocated or
+    /// opened (the consumed pin is still dropped). If it was first observed
+    /// later, the listing storage may already have been reserved and the
+    /// private read handle opened; both are released. Cancellation observed
+    /// after an attempt is not this error: it yields a `Partial` listing
+    /// that may have zero candidates.
     Cancelled,
     /// A budget value is zero, above its hard maximum, or inconsistent
     /// (more candidates than inspected records).
@@ -182,7 +194,8 @@ pub enum EnumerationError {
     /// held directory object (moved, renamed, replaced, removed, turned into
     /// a link or mount). Never adopted.
     DirectoryBindingChanged,
-    /// The ordinal does not name a candidate of this listing.
+    /// The ordinal does not name a candidate of this listing. The listing
+    /// stays available.
     OrdinalOutOfRange,
     /// A root binding, acquisition, handle-policy or system-call refusal.
     Access(AccessError),

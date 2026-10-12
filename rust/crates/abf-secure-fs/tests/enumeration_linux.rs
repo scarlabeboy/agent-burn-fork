@@ -452,6 +452,50 @@ fn ordinals_are_bounds_checked() {
     }
 }
 
+/// F19-3 (native): a refused child request returns no pin, only borrows the
+/// listing and leaves it available; every later request authorizes afresh.
+#[test]
+fn refused_child_requests_leave_the_listing_available() {
+    let case = Case::new("abf26_child_keeps_listing");
+    let f = case.file("root/d/f", "f");
+    let root = case.authorize();
+    let listing = list(&root, "d");
+    let directory = listing.directory_object_id();
+    let inode = |listing: &DirectoryListing<'_>| {
+        listing
+            .pin_regular(0)
+            .map(|p| p.evidence().object_id().inode())
+    };
+
+    // Invalid ordinal, then a valid request.
+    assert_eq!(
+        listing.pin_regular(1).unwrap_err(),
+        EnumerationError::OrdinalOutOfRange
+    );
+    assert_eq!(inode(&listing), Ok(f));
+
+    // File-policy refusal (second link), then the link is removed.
+    fs::hard_link(case.path("root/d/f"), case.path("outside/alias")).unwrap();
+    assert_eq!(
+        inode(&listing),
+        Err(EnumerationError::Access(AccessError::MultipleLinks))
+    );
+    fs::remove_file(case.path("outside/alias")).unwrap();
+    assert_eq!(inode(&listing), Ok(f));
+
+    // Missing entry, then the same object is renamed back.
+    fs::rename(case.path("root/d/f"), case.path("outside/f")).unwrap();
+    assert_eq!(
+        inode(&listing),
+        Err(EnumerationError::Access(AccessError::NotFound))
+    );
+    fs::rename(case.path("outside/f"), case.path("root/d/f")).unwrap();
+    assert_eq!(inode(&listing), Ok(f));
+
+    assert_eq!(listing.directory_object_id(), directory);
+    assert_eq!(listing.len(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Binding changes before enumeration
 // ---------------------------------------------------------------------------
@@ -1977,6 +2021,245 @@ mod scheduled {
             EnumerationError::DirectoryBindingChanged
         );
         fi::clear_schedule_hook();
+    }
+
+    // -- ABF26: cancellation lifecycle (F18-6) ---------------------------------
+
+    /// Scheduled (native): cancellation already requested on entry refuses
+    /// before the storage reservation (its schedule point is never reached)
+    /// and before any open; the consumed directory pin is still closed.
+    #[test]
+    fn entry_cancellation_still_drops_the_consumed_pin() {
+        let _leaks = LeakCheck::start();
+        let case = Case::new("abf26_entry_cancel");
+        case.file("root/d/f", "f");
+        let root = case.authorize();
+        let pin = pin_dir(&root, "d");
+        fi::take_openat2_log();
+        let before = fi::fd_counters();
+        let reached = Rc::new(Cell::new(false));
+        let seen = Rc::clone(&reached);
+        schedule(vec![at(
+            SchedulePoint::EnumerateBeforeStartCheck,
+            1,
+            move || seen.set(true),
+        )]);
+        let cancel = Cancellation::new();
+        cancel.request();
+        assert_eq!(
+            pin.enumerate(max(), &cancel).unwrap_err(),
+            EnumerationError::Cancelled
+        );
+        fi::clear_schedule_hook();
+        assert!(!reached.get(), "refused before the storage reservation");
+        assert!(fi::take_openat2_log().is_empty());
+        let after = fi::fd_counters();
+        assert_eq!(after.opened, before.opened, "nothing opened");
+        assert_eq!(after.closed, before.closed + 1, "the pin was closed");
+        assert_eq!(fi::getdents_attempts(), 0);
+    }
+
+    /// Scheduled (native): cancellation first observed after the storage
+    /// reservation, or after the private read handle was opened but before
+    /// the first attempt, is still a refusal; the acquired resources were
+    /// real (the read open is in the log) and are released.
+    #[test]
+    fn cancellation_before_the_first_attempt_can_follow_acquisition() {
+        for (point, read_opened) in [
+            (SchedulePoint::EnumerateBeforeStartCheck, false),
+            (SchedulePoint::EnumerateAfterReadOpen, true),
+            (SchedulePoint::EnumerateAfterS2, true),
+        ] {
+            let _leaks = LeakCheck::start();
+            let case = Case::new("abf26_late_cancel");
+            case.file("root/d/f", "f");
+            let root = case.authorize();
+            let pin = pin_dir(&root, "d");
+            fi::take_openat2_log();
+            let before = fi::fd_counters();
+            let cancel = Rc::new(Cancellation::new());
+            let flag = Rc::clone(&cancel);
+            schedule(vec![at(point, 1, move || flag.request())]);
+            let result = pin.enumerate(max(), &cancel);
+            fi::clear_schedule_hook();
+            assert_eq!(
+                result.unwrap_err(),
+                EnumerationError::Cancelled,
+                "{point:?}"
+            );
+            assert_eq!(fi::getdents_attempts(), 0, "{point:?}");
+            let log = calls(&fi::take_openat2_log());
+            assert_eq!(
+                log.contains(&(READ_DIR_FLAGS, 0, FULL_MASK)),
+                read_opened,
+                "{point:?}"
+            );
+            let after = fi::fd_counters();
+            assert_eq!(
+                after.opened - before.opened + 1,
+                after.closed - before.closed,
+                "{point:?}: everything acquired and the pin closed"
+            );
+        }
+    }
+
+    /// Injected EINTR (a harness answer instead of the kernel), with native
+    /// bindings: cancellation observed after an interrupted first attempt
+    /// releases a checked `Partial`/`Cancelled` listing with zero
+    /// candidates.
+    #[test]
+    fn cancellation_after_an_interrupted_attempt_can_release_zero_candidates() {
+        let _leaks = LeakCheck::start();
+        let case = Case::new("abf26_eintr_cancel");
+        case.file("root/d/a", "a");
+        let root = case.authorize();
+        let pin = pin_dir(&root, "d");
+        fi::inject_getdents(&[Some(DirentInjection::Errno(errno::EINTR))]);
+        let cancel = Rc::new(Cancellation::new());
+        let flag = Rc::clone(&cancel);
+        schedule(vec![at(
+            SchedulePoint::EnumerateAfterAttempt,
+            1,
+            move || flag.request(),
+        )]);
+        let listing = pin.enumerate(max(), &cancel).unwrap();
+        fi::clear_schedule_hook();
+        assert_eq!(fi::getdents_attempts(), 1);
+        assert_eq!(fi::remaining_getdents_injections(), 0);
+        assert_eq!(listing.status().end(), StreamEnd::Cancelled);
+        assert_eq!(listing.status().coverage(), Coverage::Partial);
+        assert_eq!(listing.len(), 0);
+        assert_eq!(listing.counters().read_attempts(), 1);
+        assert_eq!(listing.counters().records_inspected(), 0);
+    }
+
+    // -- ABF26: child failure ownership (F19-3) --------------------------------
+
+    /// Scheduled (native): a child refused for a directory binding change
+    /// returns no pin and leaves the listing; the persistent change is
+    /// refused again by a fresh request; once the binding is restored, a
+    /// fresh request succeeds.
+    #[test]
+    fn child_binding_refusal_then_restored_binding_allows_a_fresh_request() {
+        let _leaks = LeakCheck::start();
+        let case = Case::new("abf26_child_retry");
+        let f = case.file("root/d/f", "f");
+        let root = case.authorize();
+        let listing = list(&root, "d");
+        let p = paths(&case);
+        schedule(vec![at(SchedulePoint::ChildAfterPin, 1, move || {
+            fs::rename(p("root/d"), p("outside/d")).unwrap()
+        })]);
+        assert_eq!(
+            listing.pin_regular(0).unwrap_err(),
+            EnumerationError::DirectoryBindingChanged
+        );
+        fi::clear_schedule_hook();
+        assert_eq!(
+            listing.pin_regular(0).unwrap_err(),
+            EnumerationError::DirectoryBindingChanged
+        );
+        fs::rename(case.path("outside/d"), case.path("root/d")).unwrap();
+        assert_eq!(
+            listing
+                .pin_regular(0)
+                .map(|p| p.evidence().object_id().inode()),
+            Ok(f)
+        );
+        assert_eq!(listing.len(), 1);
+    }
+
+    // -- ABF26: held-object authority (A23-2) ----------------------------------
+
+    /// A23-2, exact restored schedule (native, scheduled). D = the listed
+    /// directory, X = its discovered file, E = a replacement directory,
+    /// Y = a new file in E. Before the pin: D moves out and E (with Y) takes
+    /// its place. After the pin: E moves out and D is restored. Both
+    /// directory checks pass; the held pin is Y (never X), outside the root
+    /// on return, and promotion still succeeds on it: held-object authority,
+    /// not membership, lineage or origin. No byte is read.
+    #[test]
+    fn a23_2_restored_swap_returns_a_held_object_outside_the_root() {
+        let _leaks = LeakCheck::start();
+        let case = Case::new("abf26_a23_2");
+        let x = case.file("root/d/x", "discovered-x");
+        let root = case.authorize();
+        let listing = list(&root, "d");
+        let d = listing.directory_object_id().inode();
+        assert_eq!(d, ino(&case.path("root/d")));
+        let p = paths(&case);
+        let q = p.clone();
+        let y = Rc::new(Cell::new(0));
+        let y_seen = Rc::clone(&y);
+        schedule(vec![
+            at(SchedulePoint::ChildBeforePin, 1, move || {
+                fs::rename(p("root/d"), p("outside/d-orig")).unwrap();
+                fs::create_dir(p("root/d")).unwrap();
+                fs::write(p("root/d/x"), "replacement-y").unwrap();
+                y_seen.set(ino(&p("root/d/x")));
+            }),
+            at(SchedulePoint::ChildAfterPin, 1, move || {
+                fs::rename(q("root/d"), q("outside/d-repl")).unwrap();
+                fs::rename(q("outside/d-orig"), q("root/d")).unwrap();
+            }),
+        ]);
+        let held = listing.pin_regular(0).unwrap();
+        fi::clear_schedule_hook();
+        let y = y.get();
+        let held_inode = held.evidence().object_id().inode();
+        assert_ne!(y, 0, "the replacement was created");
+        assert_eq!(held_inode, y, "the held object is Y");
+        assert_ne!(held_inode, x, "not the discovered X");
+
+        // Explicit post-return namespace samples: Y is outside the root, D
+        // (with X) is back at the original locator.
+        assert_eq!(ino(&case.path("outside/d-repl/x")), y);
+        assert!(fs::symlink_metadata(case.path("root/d-repl")).is_err());
+        assert_eq!(ino(&case.path("root/d")), d);
+        assert_eq!(ino(&case.path("root/d/x")), x);
+        assert_eq!(held.reinspect().unwrap().object_id().inode(), y);
+
+        // The listing still holds D and stays usable: a fresh request now
+        // acquires X.
+        assert_eq!(listing.directory_object_id().inode(), d);
+        assert_eq!(
+            listing
+                .pin_regular(0)
+                .map(|p| p.evidence().object_id().inode()),
+            Ok(x)
+        );
+
+        // Promotion exercises the held-object authority outside the root.
+        let readable = held.promote().unwrap();
+        assert_eq!(readable.evidence().object_id().inode(), y);
+    }
+
+    /// A23-2 control (native, scheduled): the same swap without restoring D
+    /// is a persistent directory binding change and is refused; the acquired
+    /// Y is dropped and the listing stays available.
+    #[test]
+    fn a23_2_persistent_replacement_is_refused() {
+        let _leaks = LeakCheck::start();
+        let case = Case::new("abf26_a23_2_persist");
+        let x = case.file("root/d/x", "discovered-x");
+        let root = case.authorize();
+        let listing = list(&root, "d");
+        let p = paths(&case);
+        schedule(vec![at(SchedulePoint::ChildBeforePin, 1, move || {
+            fs::rename(p("root/d"), p("outside/d-orig")).unwrap();
+            fs::create_dir(p("root/d")).unwrap();
+            fs::write(p("root/d/x"), "replacement-y").unwrap();
+        })]);
+        assert_eq!(
+            listing.pin_regular(0).unwrap_err(),
+            EnumerationError::DirectoryBindingChanged
+        );
+        fi::clear_schedule_hook();
+        assert_eq!(ino(&case.path("outside/d-orig/x")), x);
+        assert_eq!(
+            listing.pin_regular(0).unwrap_err(),
+            EnumerationError::DirectoryBindingChanged
+        );
     }
 
     // -- ledger --------------------------------------------------------------------
