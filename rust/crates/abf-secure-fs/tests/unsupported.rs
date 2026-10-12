@@ -24,7 +24,8 @@ fn supported_build_describes_itself_honestly() {
     // M2A.2a: promotion is compiled on this backend; runtime procfs
     // availability is established only by `promote` itself.
     assert!(caps.readable_promotion);
-    assert!(!caps.directory_enumeration);
+    // M2A.2b: bounded single-directory enumeration is compiled.
+    assert!(caps.directory_enumeration);
     assert!(!caps.environment_attested);
 }
 
@@ -56,6 +57,37 @@ fn unsupported_build_fails_closed() {
         SecureRoot::authorize("/").unwrap_err(),
         AccessError::Path(PathError::TooBroad)
     );
+}
+
+/// The M2A.2b facade is uninhabited without a backend: no root exists, so
+/// no directory can be pinned, enumerated or listed. Budgets and
+/// cancellation still validate (they touch no OS object).
+#[cfg(not(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    not(target_abi = "x32"),
+    not(abf_secure_fs_force_unsupported)
+)))]
+#[test]
+fn unsupported_build_has_no_directory_capability() {
+    use abf_secure_fs::{Cancellation, EnumerationBudget, EnumerationError};
+    let caps = BackendCapabilities::compiled();
+    assert!(!caps.directory_enumeration);
+    // The only way to a directory is through an authorized root.
+    assert_eq!(
+        SecureRoot::authorize("/home/user/fixtures").unwrap_err(),
+        AccessError::SecurePrimitiveUnavailable
+    );
+    assert!(EnumerationBudget::new(1, 1, 1, 1).is_ok());
+    assert_eq!(
+        EnumerationBudget::new(0, 1, 1, 1),
+        Err(EnumerationError::InvalidBudget)
+    );
+    let cancel = Cancellation::new();
+    cancel.request();
+    assert!(cancel.is_requested());
 }
 
 #[test]
@@ -390,6 +422,27 @@ mod injected {
             }
         }
         fi::reset();
+    }
+
+    /// M2A.2b harness state is bounded: an over-long `getdents64` plan or a
+    /// batch larger than the 8192-byte buffer is refused (panics) instead of
+    /// being stored.
+    #[test]
+    fn getdents_injection_state_is_bounded() {
+        use fi::DirentInjection;
+        fi::reset();
+        let too_long = vec![None; fi::MAX_GETDENTS_PLAN + 1];
+        assert!(std::panic::catch_unwind(|| fi::inject_getdents(&too_long)).is_err());
+        let too_big = vec![Some(DirentInjection::Batch(vec![0; 8193]))];
+        assert!(std::panic::catch_unwind(|| fi::inject_getdents(&too_big)).is_err());
+        assert_eq!(fi::remaining_getdents_injections(), 0);
+        fi::inject_getdents(&vec![None; fi::MAX_GETDENTS_PLAN]);
+        assert_eq!(fi::remaining_getdents_injections(), fi::MAX_GETDENTS_PLAN);
+        fi::inject_getdents(&[Some(DirentInjection::Batch(vec![0; 8192]))]);
+        assert_eq!(fi::remaining_getdents_injections(), 1);
+        fi::reset();
+        assert_eq!(fi::remaining_getdents_injections(), 0);
+        assert_eq!(fi::getdents_attempts(), 0);
     }
 
     /// Defense in depth behind RESOLVE_NO_XDEV: a root on another device than

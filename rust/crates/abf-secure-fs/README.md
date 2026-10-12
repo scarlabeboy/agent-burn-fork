@@ -1,8 +1,10 @@
-# abf-secure-fs (ABF M2A.1 + M2A.2a)
+# abf-secure-fs (ABF M2A.1 + M2A.2a + M2A.2b)
 
 Secure **Linux file-object pinning** under an authorized root (metadata
-only), and **experimental readable promotion** of a pinned file. It is a
-standalone research foundation for later hardened collection work.
+only), **experimental readable promotion** of a pinned file, and **bounded
+single-directory enumeration** with fresh root-relative authorization of a
+selected file. It is a standalone research foundation for later hardened
+collection work.
 
 Status:
 
@@ -11,11 +13,15 @@ Status:
 - M2A.2a readable promotion: implementation candidate from conversation
   ABF15, following the ABF14 design. It requires an independent read-only
   security review before any use.
+- M2A.2b directory enumeration: implementation candidate from conversation
+  ABF18, following the ABF17/ABF17B design. It requires an independent
+  read-only security review (ABF19) before any use.
 
 **Production collection: BLOCKED.** The default API reads no file contents
-(only the two-key test harness can read bounded synthetic bytes),
-enumerates no directories, has no Windows backend and is not integrated with
-the M1 boundary (`abf-collection-boundary`), any parser or any application.
+(only the two-key test harness can read bounded synthetic bytes), enumerates
+one explicitly pinned directory at a time without recursion, has no Windows
+backend and is not integrated with the M1 boundary
+(`abf-collection-boundary`), any scanner, parser or application.
 
 ## What it provides
 
@@ -30,17 +36,23 @@ the M1 boundary (`abf-collection-boundary`), any parser or any application.
 | `PinnedRegularFile::promote(self)` | M2A.2a. **Consumes** the pin and returns a `ReadableRegularFile` for the **same** object, or a coded refusal (the pin and every acquired handle are then closed). |
 | `ReadableRegularFile::evidence()` | Handle-derived evidence sampled from the new readable handle (S1), before any read. |
 | `ReadableRegularFile::reinspect()` | Fresh evidence from **both** held handles; both must still be a regular file with the pinned identity and one link. |
+| `SecureRoot::pin_directory(DirectoryTarget)` | M2A.2b. Pins the root itself (`Root`, requested explicitly) or a validated directory beneath it (`Relative`) as a `PinnedDirectory` that **borrows** the root. |
+| `PinnedDirectory::enumerate(self, EnumerationBudget, &Cancellation)` | **Consumes** the pin; one bounded discovery of that single directory. Returns a `DirectoryListing` or a coded `EnumerationError` (nothing kept). |
+| `DirectoryListing::{len, is_empty, status, counters, directory_object_id}` | Candidate count, `DiscoveryStatus` (`StreamEnd` + `Coverage`), bounded `DiscoveryCounters`, handle-derived directory identity. |
+| `DirectoryListing::pin_regular(ordinal)` | Authorizes one candidate **afresh** through the unchanged root-relative `pin_regular` protocol, with directory binding checks before and after. |
+| `EnumerationBudget::{new, maximum}`, `Cancellation` | Validated caller budget (cannot exceed the hard maximums); polled cancellation flag. |
 | `RelativePath::new(&str)`, `check_root_path(&str)` | Pure, bounded lexical validation. |
 | `BackendCapabilities::compiled()` | Honest compile-time description. Never attests a WSL distribution. |
-| `AccessError`, `PathError`, `ObjectKind` | Code-only errors. No paths, names or OS message strings. `AccessError::PromotionWouldBlock` is new in M2A.2a. |
+| `AccessError`, `PathError`, `ObjectKind`, `EnumerationError` | Code-only errors. No paths, names or OS message strings. `AccessError::PromotionWouldBlock` is new in M2A.2a; `EnumerationError` in M2A.2b. |
 
 Nothing in the public API exposes a raw descriptor, a `File`, a
 `Read`/`Write`/`Seek` implementation, `AsFd`/`AsRawFd`, `Deref`, a procfs
-path, an absolute reopen path, open flags, or a way to supply an identity,
-descriptor number or procfs anchor as proof. `SecureRoot`,
-`PinnedRegularFile` and `ReadableRegularFile` are not `Clone`, have private
-fields and no public constructor, and their `Debug` output never contains
-paths or contents. The default API has **no** method that reads bytes.
+path, an absolute reopen path, open flags, a directory entry name or locator,
+or a way to supply an identity, descriptor number, procfs anchor or status as
+proof. `SecureRoot`, `PinnedRegularFile`, `ReadableRegularFile`,
+`PinnedDirectory` and `DirectoryListing` are not `Clone`, have private fields
+and no public constructor, and their `Debug` output never contains paths,
+names or contents. The default API has **no** method that reads file bytes.
 
 ## Supported platform
 
@@ -110,10 +122,17 @@ type-inspected without blocking or activation.
 
 Four distinct properties. Only A and B are provided.
 
-**A. Resolution confinement (provided by the kernel).** Every resolution
-beneath a held directory (root acquisition, binding checks, pin acquisition
-and pin verification) is one `openat2` call with the mandatory mask
-`RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_XDEV`.
+**A. Resolution confinement (provided by the kernel).** Every resolution of
+a **source path** beneath a held directory (root acquisition, binding
+checks, file pin acquisition and verification, directory pin acquisition,
+verification and binding checks, and the private directory self-open of
+`.`) is one `openat2` call with the mandatory mask
+`RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_XDEV`
+(0x0F). The process-root anchor `/` uses `NO_SYMLINKS|NO_MAGICLINKS|NO_XDEV`
+(0x07; `BENEATH` refuses every absolute path). The only other masks are the
+private procfs opens of readable promotion (`proc` with 0x0E, the fd leaf
+with 0, see below); they never resolve a source path and are not reachable
+from directory enumeration.
 The masks are `const` and are never weakened, retried without a flag, or
 replaced by a fallback. The crate relies on the documented semantics of
 these flags. The installed `openat2(2)` manual says `RESOLVE_BENEATH` does
@@ -254,6 +273,167 @@ Retries and errors:
   administrators, same-user malware and deliberate harness builds are out of
   scope.
 
+## Directory enumeration (M2A.2b, experimental)
+
+`SecureRoot::pin_directory(target) -> Result<PinnedDirectory<'_>, AccessError>`
+and `PinnedDirectory::enumerate(self, budget, &cancel) ->
+Result<DirectoryListing<'_>, EnumerationError>` discover the entries of
+**one** directory. This is not a scanner: no recursion, no cursor or
+continuation, no automatic rescan, no callbacks, no file content.
+
+### Directory capability
+
+| Step | Call | Flags | Mask | Admission |
+|---|---|---|---|---|
+| Binding | root binding check (unchanged) | — | 0x0F | root path still binds the held root |
+| Pin | `openat2(held root, "." or relative locator)` | `O_PATH\|O_DIRECTORY\|O_NOFOLLOW\|O_CLOEXEC` | 0x0F | directory, non-zero `(dev, ino)`, root's device, ext magic, `nlink > 0` |
+| Verify | relative: second independent acquisition, same parameters; root target: the pin must be the held root | same | 0x0F | same policy, same `(dev, ino)` |
+| Binding | root binding check, final policy on the held pin | — | 0x0F | — |
+
+Directory policy is **not** the regular-file `nlink == 1` rule: directory
+link counts differ (subdirectories, filesystem features); only `nlink > 0`
+(not deleted) is required. A final-component symlink is refused (`ENOTDIR`,
+observed natively: `O_NOFOLLOW` yields the link and `O_DIRECTORY` refuses
+it); an intermediate symlink is `ELOOP`; a mount crossing is `EXDEV`.
+
+The directory binding check (root binding; for a relative target, a fresh
+full-mask acquisition of the original locator that must reach the held
+identity; and the held pin still a linked directory with that identity) runs at the start, after the
+read open, after **every** `getdents64` attempt (including interrupted and
+end-of-stream ones) and before release. A persistent observed change is
+`DirectoryBindingChanged` (or `RootBindingChanged`) and discards everything;
+a replacement is never adopted. These are samples: a move restored between
+two checks, or made after the last one, is not observed. No continuous
+namespace membership is claimed.
+
+### Private read handle
+
+S0 checks the held pin. Then **one** `openat2(held pin, ".")` with
+`O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK`, mode 0, mask 0x0F:
+`.` names the held object itself, never a pathname that could have been
+rebound. The name, flags and mask are private constants of the ABI module;
+the function accepts only a directory pin type (not a generic descriptor,
+procfs capability or file pin). **No procfs** is involved. S1 checks the new
+handle (directory, the pinned identity and device, linked) before any read;
+S2 rechecks the pin. The handle is a distinct private type, used only by
+`getdents64`, and is closed before the listing is returned. Opening a
+directory for reading needs read permission and may update access times or
+generate notifications.
+
+### Bounded `getdents64` and safe framing
+
+`getdents64` (syscall 217, GNU LP64 only; x32 is excluded) fills one fixed,
+initialized 8192-byte buffer. The signed return is checked before any
+conversion; a count above the buffer is refused. **Only an actual zero-byte
+return is end of stream.** `EINTR` is retried at most twice consecutively;
+`EAGAIN`, `ENOENT` and every other errno are fatal.
+
+Records are framed in safe Rust from explicit byte slices
+(`d_reclen` u16 at 16, `d_name` at 19): at least 20 bytes, a record length
+of at least 20 that ends inside the returned bytes, a NUL inside the record,
+a non-empty name without `/`. Bytes after the NUL are ignored padding. Any
+framing failure refuses the **entire** listing, including earlier valid
+records and batches. `d_ino`, `d_off` and `d_type` are never decoded: they
+authorize, identify, type, filter or order nothing.
+
+Names: exact `.`/`..` are counted as navigation (no coverage loss). Every
+other name must be at most 255 bytes, strict UTF-8 and, joined after the
+directory locator, pass the unchanged `RelativePath` rules (no control
+characters, `\` or `:`; at most 32 components and 1024 bytes). A refused name
+is counted, never retained or logged, and makes the coverage `Partial`.
+Symlinks, directories, FIFOs and sockets are just names; nothing is opened,
+followed or visited.
+
+### Budgets and memory
+
+| Resource | Hard maximum per enumeration |
+|---|---|
+| syscall buffer | 8192 bytes, fixed, never grown |
+| inspected records (incl. `.`, `..`, rejected, duplicates) | 4096 |
+| retained candidates | 512 |
+| bytes per name | 255 |
+| retained name bytes | 65536 |
+| `getdents64` attempts (incl. `EINTR`, errors, EOF) | 64; at most 2 consecutive `EINTR` retries |
+| scan steps (attempts + records) | 4160 |
+| directories visited | 1 (no recursion) |
+| confined opens | initial attempt + at most 2 retries on `EAGAIN`/`EINTR`, identical flags |
+| descriptors held | ≤ 5 during enumeration (root 2, pin, read handle, one verifier); a listing keeps 3 with the root; ≤ 6 during a child request |
+| accounted retained output | 98304 bytes |
+| explicit temporary payload | 16384 bytes |
+
+`EnumerationBudget::new` rejects zero, above-maximum and inconsistent
+(`candidates > inspected records`) values; nothing can be expanded past the
+maximums. The name arena and slot vector are reserved **once**, before any
+read, with `try_reserve_exact`; their **actual** capacities, the single
+retained locator copy (exact boxed C string) and the listing's real inline
+size (checked at compile time against a 4096-byte allowance; 216 bytes on
+the reviewed target) must fit 98304 bytes, or the call refuses
+(`AllocationRefused`). Nothing is pushed beyond the reservation and a
+changed capacity is refused. The sort is an in-place insertion sort (no
+allocation, no recursion, at most 130816 comparisons). Explicit temporary
+payload: the 8192-byte buffer and one 1025-byte join scratch (9217 bytes);
+a child request uses one join scratch and one revalidated `RelativePath`
+(2050 bytes). These limits do **not** bound process RSS, allocator
+metadata or rounding, kernel memory, stack usage or wall-clock time;
+`O_NONBLOCK` and cancellation cannot interrupt a filesystem call already in
+progress.
+
+### Status and cancellation
+
+`DiscoveryStatus` has two parts. `StreamEnd`: `Eof` (actual zero-byte
+read), `Budget(kind)` or `Cancelled`. `Coverage`: `Exhausted` only for a
+real end of stream with every returned record inspected, no rejected name,
+valid final bindings and no cancellation; otherwise `Partial`. `Exhausted`
+describes a live discovery stream, **not** a snapshot, a current inventory,
+"verified zero" usage or the authorization of any child. There is no
+`Complete` state and no public status constructor.
+
+A reached ceiling stops before the next action without an extra read to look
+for the end; the last permitted batch is still parsed subject to the record,
+candidate, byte and cancellation limits (tie order: cancellation, records,
+candidates, bytes, then attempts). A name that would exceed the byte budget
+is charged as inspected and not stored. Cancellation requested before the
+call (or observed before the first read) is `EnumerationError::Cancelled`
+before any allocation or open (when requested on entry). Observed later, it
+yields a `Partial`/`Cancelled` listing after the final checks; observed at
+release it wins over end of stream and budgets. A fatal syscall, framing,
+binding or storage error always wins and discards every candidate.
+
+### Child authorization
+
+A listing exposes only ordinals (`0..len()`, candidates sorted by raw name
+bytes; duplicates kept). `DirectoryListing::pin_regular(i)` bounds-checks the
+ordinal, revalidates the joined root-relative path, checks root and
+directory binding, runs the **unchanged** `SecureRoot::pin_regular` from the
+**held root** (never from the held directory descriptor), and checks both
+bindings again (a refused result is dropped). The discovered name is a
+request, not evidence: a replacement or moved-in regular file that is
+currently, admissibly bound there may be pinned as a different object;
+symlinks, directories, special files, multiple links and missing names are
+refused by the file protocol. Nothing is promoted or read.
+
+### Privacy
+
+Names, locators and descriptors never leave the crate. `Debug`/`Display`
+show only object identities, counts, statuses and fixed codes. Counters
+reveal directory cardinality and rejection facts by design.
+
+### Native evidence (ABF18)
+
+Run natively on the admitted ext4 fixture: root and subdirectory pins,
+exact flags and masks of every open (harness log) and the kernel's view of
+the read handle, empty/normal/multi-batch directories and real end of
+stream, every budget boundary, non-UTF-8/control/cross-OS/255-byte names,
+symlinks/FIFOs/sockets/hard links listed but never activated, nested
+directories not visited, persistent and transient moves, root and
+intermediate replacement, deletion, stale-directory child attacks, changed
+and moved-in children, scheduled races at every protocol step, injected
+`getdents64` errors and malformed data, allocation refusal, cancellation,
+panics, descriptor peaks and real descriptor closure in a child process, and
+bounded concurrent churn. Finite tests are not a proof of race freedom. Mount
+boundary tests need a separately authorized foreign-mount target and were
+not run in ABF18.
+
 ## Building and testing (isolated, offline)
 
 Standalone `[workspace]`, no dependencies, no build script. Only these
@@ -288,7 +468,13 @@ a separate-process writer); they inherit the same variables:
   `<dir>/<test>-<pid>/` case directory there.
 - `ABF_SECURE_FS_FOREIGN_MOUNT_DIR`: an existing directory on a
   **different** mount (for example tmpfs). It is only resolved, never
-  written, to check the `RESOLVE_NO_XDEV` refusal.
+  written, to check the `RESOLVE_NO_XDEV` refusal. Without it, skip
+  `root_on_another_mount_is_refused_by_no_xdev` explicitly (reported as not
+  run, never as a pass).
+
+The enumeration tests (`tests/enumeration_linux.rs`) use only
+`ABF_SECURE_FS_FIXTURE_DIR`, with `abf18-<test>-<pid>` case directories, and
+re-run their closure test in a child process like the promotion tests.
 
 ### Test harness (`fault-injection` + `abf_secure_fs_harness`)
 
@@ -297,7 +483,11 @@ injection that replaces real `openat2`, `readlinkat` or synthetic `pread`
 calls, a procfs self-link payload override, an unbounded `open_how` log,
 **filesystem-magic and identity overrides**, descriptor counters,
 deterministic schedule hooks (including the promotion steps), descriptor
-flag/offset probes of a promoted file, and the crate's **only** byte-reading
+flag/offset probes of a promoted file, M2A.2b `getdents64` answers (a
+bounded plan of at most 128 entries, each batch at most one buffer: forged
+directory data), an allocation-refusal flag, the kernel flags of the last
+directory read handle, a descriptor high-water mark and a listing ledger
+probe, and the crate's **only** byte-reading
 entry point, `ReadableRegularFile::harness_read_at` (at most 4096 bytes per
 call, checked offset and length, fixed staging buffer, both handles checked
 before and after, bytes returned only after the post-checks). The overrides
@@ -321,7 +511,9 @@ tests.
 
 ## Not implemented (later gates, separately authorized)
 
-A production read API, bounded reading and content coherence, directory
-enumeration, the Windows backend, M1 integration, parsers, persistence and
-UI. Readable promotion is an experimental M2A.2a research capability with no
-production read path. No production readiness is claimed.
+A production read API, bounded reading and content coherence, recursive or
+multi-directory scanning (and any aggregate budget across listings), the
+Windows backend, M1 integration, parsers, persistence and UI. Readable
+promotion (M2A.2a) and directory enumeration (M2A.2b) are experimental
+research capabilities with no production collection path. No production
+readiness is claimed.

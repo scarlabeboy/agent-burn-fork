@@ -17,6 +17,16 @@
 //!   [`AccessError::UnsupportedFilesystem`]. There is no weaker fallback.
 //! - **Pinning is metadata only:** pinning never reads file contents,
 //!   enumerates directories, or opens an object for I/O.
+//! - **Directory enumeration (M2A.2b):** [`SecureRoot::pin_directory`] pins
+//!   the root or a validated directory beneath it as a [`PinnedDirectory`].
+//!   [`PinnedDirectory::enumerate`] consumes it and performs **one** bounded
+//!   `getdents64` discovery of that single directory (no recursion) through
+//!   a private read-only self-open of `.` relative to the held pin, returning
+//!   a [`DirectoryListing`]. Names stay private: candidates are opaque
+//!   ordinals, and [`DirectoryListing::pin_regular`] authorizes one of them
+//!   **afresh** through [`SecureRoot::pin_regular`]'s root-relative protocol.
+//!   Discovery is not authorization, and no content is read. See
+//!   `README.md`, "Directory enumeration".
 //! - **Readable promotion (M2A.2a):** [`PinnedRegularFile::promote`]
 //!   consumes a pin and returns a [`ReadableRegularFile`] that owns the
 //!   original `O_PATH` handle **and** a new read-only descriptor of the
@@ -24,9 +34,13 @@
 //!   the current thread (never through a pathname of the file). The default
 //!   API exposes no way to read bytes; only the two-key test harness has a
 //!   bounded synthetic read. See `README.md`, "Readable promotion".
-//! - **Confinement comes from the kernel:** every resolution beneath a held
-//!   directory uses `openat2` with the mandatory mask
-//!   `BENEATH|NO_SYMLINKS|NO_MAGICLINKS|NO_XDEV`. The crate relies on the
+//! - **Confinement comes from the kernel:** every resolution of a source
+//!   path beneath a held directory (root, binding checks, file and
+//!   directory pins, the directory self-open) uses `openat2` with the
+//!   mandatory mask `BENEATH|NO_SYMLINKS|NO_MAGICLINKS|NO_XDEV`; the
+//!   process-root anchor `/` uses `NO_SYMLINKS|NO_MAGICLINKS|NO_XDEV`. The
+//!   only other masks are the private procfs opens of readable promotion,
+//!   which never resolve a source path (README). The crate relies on the
 //!   documented semantics of these flags, under a trusted kernel. The second
 //!   (verification) resolution checks identity; it is not by itself a proof
 //!   of confinement.
@@ -74,6 +88,7 @@ macro_rules! schedule_point {
     };
 }
 
+mod enumeration;
 pub mod error;
 pub mod path;
 mod sys;
@@ -106,12 +121,29 @@ mod promotion;
     not(target_abi = "x32"),
     not(abf_secure_fs_force_unsupported)
 ))]
+mod directory;
+
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    not(target_abi = "x32"),
+    not(abf_secure_fs_force_unsupported)
+))]
 mod imp {
+    pub(crate) use crate::directory::{Directory, Listing, Target as DirectoryPinTarget};
     pub(crate) use crate::linux::{Pinned, Root};
     pub(crate) use crate::promotion::Readable;
 }
 
-pub use error::{AccessError, ObjectKind, PathError};
+pub use enumeration::{
+    BudgetKind, Cancellation, Coverage, DiscoveryCounters, DiscoveryStatus, EnumerationBudget,
+    MAX_CANDIDATES, MAX_CONSECUTIVE_INTERRUPTS, MAX_INSPECTED_RECORDS, MAX_READ_ATTEMPTS,
+    MAX_RETAINED_NAME_BYTES, MAX_RETAINED_OUTPUT_BYTES, MAX_SCAN_STEPS,
+    MAX_TEMPORARY_PAYLOAD_BYTES, READ_BUFFER_BYTES, StreamEnd,
+};
+pub use error::{AccessError, EnumerationError, ObjectKind, PathError};
 pub use path::{
     MAX_COMPONENT_BYTES, MAX_RELATIVE_BYTES, MAX_RELATIVE_COMPONENTS, MAX_ROOT_BYTES,
     MAX_ROOT_COMPONENTS, RelativePath, check_root_path,
@@ -218,6 +250,135 @@ impl SecureRoot {
     /// affect it.
     pub fn pin_regular(&self, relative: &RelativePath) -> Result<PinnedRegularFile, AccessError> {
         let (inner, evidence) = self.inner.pin_regular(relative)?;
+        Ok(PinnedRegularFile { inner, evidence })
+    }
+
+    /// M2A.2b. Pins the directory `target` beneath the held root (or the
+    /// held root itself) as an `O_PATH` directory capability that borrows
+    /// this root. Root binding is checked before and after; a relative
+    /// target is verified by a second independent full-mask resolution.
+    /// Directory policy: a directory with a concrete identity on the root's
+    /// device and ext-family filesystem, with at least one link (the
+    /// regular-file single-link rule does not apply to directories).
+    pub fn pin_directory(
+        &self,
+        target: DirectoryTarget<'_>,
+    ) -> Result<PinnedDirectory<'_>, AccessError> {
+        let target = match target {
+            DirectoryTarget::Root => imp::DirectoryPinTarget::Root,
+            DirectoryTarget::Relative(path) => imp::DirectoryPinTarget::Relative(path),
+        };
+        imp::Directory::pin(&self.inner, target).map(|inner| PinnedDirectory { inner })
+    }
+}
+
+/// The directory to pin with [`SecureRoot::pin_directory`]: the authorized
+/// root itself (requested explicitly; never the process root), or a
+/// validated relative path beneath it.
+#[derive(Debug, Clone, Copy)]
+pub enum DirectoryTarget<'a> {
+    Root,
+    Relative(&'a RelativePath),
+}
+
+/// A pinned directory (M2A.2b): owns one `O_PATH` directory handle and its
+/// original root-relative locator, and borrows the [`SecureRoot`] that
+/// authorized it, which therefore outlives it. Not `Clone`; no descriptor,
+/// path or name is exposed, and `Debug` shows only the object identity.
+pub struct PinnedDirectory<'root> {
+    inner: imp::Directory<'root>,
+}
+
+impl std::fmt::Debug for PinnedDirectory<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PinnedDirectory")
+            .field("object", &self.inner.id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'root> PinnedDirectory<'root> {
+    /// Handle-derived identity of the pinned directory.
+    pub fn object_id(&self) -> ObjectId {
+        self.inner.id()
+    }
+
+    /// One bounded discovery of this single directory. **Consumes the pin**:
+    /// on success the listing keeps it; on refusal it is closed with every
+    /// handle acquired by the call, and no name or counter is returned.
+    ///
+    /// Root and directory binding are checked at the start, after the
+    /// private read open, after every `getdents64` attempt and before
+    /// release. A binding, system-call, framing or storage refusal discards
+    /// the whole listing. A reached budget or a cancellation observed after
+    /// reading started returns only what was kept, with a `Partial` status.
+    /// Cancellation requested before the call is
+    /// [`EnumerationError::Cancelled`] before anything is allocated or
+    /// opened. There is no cursor, continuation or retry; a new enumeration
+    /// needs a new pin and may repeat or miss entries.
+    pub fn enumerate(
+        self,
+        budget: EnumerationBudget,
+        cancel: &Cancellation,
+    ) -> Result<DirectoryListing<'root>, EnumerationError> {
+        self.inner
+            .enumerate(budget, cancel)
+            .map(|inner| DirectoryListing { inner })
+    }
+}
+
+/// The result of one bounded discovery: an opaque, bounded, sorted set of
+/// candidates addressed by ordinal (`0..len()`), a status and counters. It
+/// keeps the directory capability and the root borrow. Names, paths and
+/// descriptors never leave it; `Debug` shows only counts, status and the
+/// directory identity. A candidate is a **request**, not authorization.
+pub struct DirectoryListing<'root> {
+    inner: imp::Listing<'root>,
+}
+
+impl std::fmt::Debug for DirectoryListing<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectoryListing")
+            .field("directory", &self.inner.directory_id())
+            .field("candidates", &self.inner.len())
+            .field("status", &self.inner.status())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DirectoryListing<'_> {
+    /// Number of retained candidates.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.len() == 0
+    }
+
+    pub fn status(&self) -> DiscoveryStatus {
+        self.inner.status()
+    }
+
+    pub fn counters(&self) -> DiscoveryCounters {
+        self.inner.counters()
+    }
+
+    /// Identity of the enumerated directory (the held pin).
+    pub fn directory_object_id(&self) -> ObjectId {
+        self.inner.directory_id()
+    }
+
+    /// Authorizes candidate `ordinal` **afresh**: checks root and directory
+    /// binding, then pins the joined root-relative path with the unchanged
+    /// [`SecureRoot::pin_regular`] protocol from the held **root** (never
+    /// from the directory handle), then checks both bindings again. The
+    /// result is whatever single-link regular file is currently, admissibly
+    /// bound there; nothing ties it to the entry seen during discovery.
+    /// Directories, symlinks and special files are refused by that
+    /// protocol. No content is read and nothing is promoted.
+    pub fn pin_regular(&self, ordinal: usize) -> Result<PinnedRegularFile, EnumerationError> {
+        let (inner, evidence) = self.inner.pin_regular(ordinal)?;
         Ok(PinnedRegularFile { inner, evidence })
     }
 }
@@ -328,15 +489,18 @@ pub struct BackendCapabilities {
     pub backend: Backend,
     /// Root authorization and regular-file metadata pinning.
     pub metadata_pinning: bool,
-    /// Resolve mask required for every resolution beneath a held directory
-    /// (`RESOLVE_BENEATH|NO_SYMLINKS|NO_MAGICLINKS|NO_XDEV`), or 0 without a
-    /// backend.
+    /// Resolve mask required for every source-path resolution beneath a
+    /// held directory (`RESOLVE_BENEATH|NO_SYMLINKS|NO_MAGICLINKS|NO_XDEV`),
+    /// or 0 without a backend. It does not describe the process-root anchor
+    /// (`/`, 0x07) or the private procfs opens of readable promotion, which
+    /// never resolve a source path.
     pub required_resolve_mask: u64,
     /// [`PinnedRegularFile::promote`] is implemented (M2A.2a, Linux
     /// backend). Runtime availability (procfs) is established only by
     /// `promote` itself.
     pub readable_promotion: bool,
-    /// Always false in M2A.1.
+    /// [`SecureRoot::pin_directory`] and bounded single-directory
+    /// enumeration are implemented (M2A.2b, Linux backend).
     pub directory_enumeration: bool,
     /// Always false: a Linux build does not establish that it runs in a
     /// particular WSL distribution.
@@ -353,8 +517,13 @@ impl BackendCapabilities {
             not(target_abi = "x32"),
             not(abf_secure_fs_force_unsupported)
         ))]
-        let (backend, metadata_pinning, required_resolve_mask, readable_promotion) =
-            (Backend::LinuxX86_64Gnu, true, linux::REQUIRED_RESOLVE, true);
+        let (backend, metadata_pinning, required_resolve_mask, readable_promotion, enumeration) = (
+            Backend::LinuxX86_64Gnu,
+            true,
+            linux::REQUIRED_RESOLVE,
+            true,
+            true,
+        );
         #[cfg(not(all(
             target_os = "linux",
             target_arch = "x86_64",
@@ -363,14 +532,14 @@ impl BackendCapabilities {
             not(target_abi = "x32"),
             not(abf_secure_fs_force_unsupported)
         )))]
-        let (backend, metadata_pinning, required_resolve_mask, readable_promotion) =
-            (Backend::Unavailable, false, 0, false);
+        let (backend, metadata_pinning, required_resolve_mask, readable_promotion, enumeration) =
+            (Backend::Unavailable, false, 0, false, false);
         Self {
             backend,
             metadata_pinning,
             required_resolve_mask,
             readable_promotion,
-            directory_enumeration: false,
+            directory_enumeration: enumeration,
             environment_attested: false,
         }
     }
@@ -388,7 +557,12 @@ impl BackendCapabilities {
     not(abf_secure_fs_force_unsupported)
 )))]
 mod imp {
-    use crate::{AccessError, FileEvidence, ObjectId, RelativePath};
+    use crate::{
+        AccessError, Cancellation, DiscoveryCounters, DiscoveryStatus, EnumerationBudget,
+        EnumerationError, FileEvidence, ObjectId, RelativePath,
+    };
+    use std::convert::Infallible;
+    use std::marker::PhantomData;
 
     #[derive(Debug)]
     pub(crate) enum Root {}
@@ -398,6 +572,72 @@ mod imp {
 
     #[derive(Debug)]
     pub(crate) enum Readable {}
+
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) enum DirectoryPinTarget<'a> {
+        Root,
+        Relative(&'a RelativePath),
+    }
+
+    /// Uninhabited: no root exists, so no directory can be pinned.
+    #[derive(Debug)]
+    pub(crate) struct Directory<'r> {
+        never: Infallible,
+        _root: PhantomData<&'r Root>,
+    }
+
+    /// Uninhabited, like [`Directory`].
+    #[derive(Debug)]
+    pub(crate) struct Listing<'r> {
+        never: Infallible,
+        _root: PhantomData<&'r Root>,
+    }
+
+    impl<'r> Directory<'r> {
+        pub(crate) fn pin(
+            root: &'r Root,
+            _target: DirectoryPinTarget<'_>,
+        ) -> Result<Self, AccessError> {
+            match *root {}
+        }
+
+        pub(crate) fn id(&self) -> ObjectId {
+            match self.never {}
+        }
+
+        pub(crate) fn enumerate(
+            self,
+            _budget: EnumerationBudget,
+            _cancel: &Cancellation,
+        ) -> Result<Listing<'r>, EnumerationError> {
+            match self.never {}
+        }
+    }
+
+    impl Listing<'_> {
+        pub(crate) fn len(&self) -> usize {
+            match self.never {}
+        }
+
+        pub(crate) fn status(&self) -> DiscoveryStatus {
+            match self.never {}
+        }
+
+        pub(crate) fn counters(&self) -> DiscoveryCounters {
+            match self.never {}
+        }
+
+        pub(crate) fn directory_id(&self) -> ObjectId {
+            match self.never {}
+        }
+
+        pub(crate) fn pin_regular(
+            &self,
+            _ordinal: usize,
+        ) -> Result<(Pinned, FileEvidence), EnumerationError> {
+            match self.never {}
+        }
+    }
 
     impl Root {
         pub(crate) fn authorize(root: &str) -> Result<Self, AccessError> {
@@ -626,6 +866,86 @@ pub mod fault_injection {
         FdCounters { opened, closed }
     }
 
+    /// Highest number of descriptors wrapped on this thread and still open
+    /// at the same time, since the last [`reset`] or [`reset_peak_descriptors`].
+    pub fn peak_open_descriptors() -> u64 {
+        fault::peak()
+    }
+
+    /// Restarts [`peak_open_descriptors`] from the currently open count.
+    pub fn reset_peak_descriptors() {
+        fault::reset_peak();
+    }
+
+    /// Largest accepted `getdents64` plan ([`inject_getdents`]).
+    pub const MAX_GETDENTS_PLAN: usize = fault::MAX_DIRENT_PLAN;
+
+    /// A planned replacement for one `getdents64` call (M2A.2b). Forged
+    /// directory data: harness only.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum DirentInjection {
+        /// Answer with this errno instead of calling the kernel.
+        Errno(i32),
+        /// Answer with these bytes (at most one 8192-byte buffer) instead of
+        /// calling the kernel; the returned count is their length.
+        Batch(Vec<u8>),
+        /// Answer with this raw signed count without writing the buffer
+        /// (models an impossible kernel count).
+        Return(i64),
+    }
+
+    /// Plan for the next `getdents64` calls on this thread: `Some(..)`
+    /// answers that call instead of the kernel, `None` makes the real call.
+    /// Panics above [`MAX_GETDENTS_PLAN`] entries or for a batch larger than
+    /// the buffer (bounded harness state).
+    pub fn inject_getdents(plan: &[Option<DirentInjection>]) {
+        fault::set_dirent_plan(
+            &plan
+                .iter()
+                .map(|entry| {
+                    entry.clone().map(|injection| match injection {
+                        DirentInjection::Errno(errno) => fault::DirentInjection::Errno(errno),
+                        DirentInjection::Batch(bytes) => fault::DirentInjection::Batch(bytes),
+                        DirentInjection::Return(ret) => fault::DirentInjection::Return(ret),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// `getdents64` attempts (real or injected) since the last reset.
+    pub fn getdents_attempts() -> u64 {
+        fault::dirent_calls()
+    }
+
+    /// `getdents64` plan entries not consumed yet.
+    pub fn remaining_getdents_injections() -> usize {
+        fault::remaining_dirent_plan()
+    }
+
+    /// The next enumeration on this thread fails its storage reservation.
+    pub fn refuse_next_allocation() {
+        fault::set_refuse_allocation(true);
+    }
+
+    /// Real `(F_GETFL, F_GETFD)` of the last directory read handle opened on
+    /// this thread, sampled right after its open.
+    pub fn last_directory_read_status() -> Option<(i32, i32)> {
+        fault::directory_read_status()
+    }
+
+    /// Actual retained-output ledger of a listing, in bytes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RetainedLedger {
+        /// Actual capacity of the name arena.
+        pub arena_capacity: usize,
+        /// Actual slot capacity times the 8-byte slot size.
+        pub slots_capacity_bytes: usize,
+        /// Retained locator heap bytes plus the listing's inline size.
+        pub fixed: usize,
+        pub total: usize,
+    }
+
     /// Runs `hook` synchronously at every [`SchedulePoint`] on this thread.
     /// The hook must not call `set_schedule_hook`/`clear_schedule_hook`.
     pub fn set_schedule_hook(hook: impl FnMut(SchedulePoint) + 'static) {
@@ -702,5 +1022,30 @@ impl ReadableRegularFile {
     /// nothing. Returns the new offset.
     pub fn harness_seek(&self, to: u64) -> u64 {
         self.inner.seek_to(to).expect("lseek on readable")
+    }
+}
+
+/// Harness-only ledger probe of a listing (feature `fault-injection` **and**
+/// `--cfg abf_secure_fs_harness`). Not present in any ordinary build.
+#[cfg(all(
+    feature = "fault-injection",
+    abf_secure_fs_harness,
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    not(target_abi = "x32"),
+    not(abf_secure_fs_force_unsupported)
+))]
+impl DirectoryListing<'_> {
+    /// Actual capacities and fixed parts accounted for this listing.
+    pub fn harness_retained_ledger(&self) -> fault_injection::RetainedLedger {
+        let ledger = self.inner.ledger();
+        fault_injection::RetainedLedger {
+            arena_capacity: ledger.arena_capacity,
+            slots_capacity_bytes: ledger.slots_capacity_bytes,
+            fixed: ledger.fixed,
+            total: ledger.total,
+        }
     }
 }

@@ -157,3 +157,55 @@ impl From<PathError> for AccessError {
         Self::Path(error)
     }
 }
+
+/// Coded refusal of a directory enumeration (M2A.2b) or of the
+/// authorization of one discovered child. Like [`AccessError`], no variant
+/// carries a name, a path, an OS message or caller text. A refusal never
+/// comes with candidates: the whole listing is discarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EnumerationError {
+    /// Cancellation was requested before any entry was read. Requested on
+    /// entry, nothing was allocated or opened.
+    Cancelled,
+    /// A budget value is zero, above its hard maximum, or inconsistent
+    /// (more candidates than inspected records).
+    InvalidBudget,
+    /// Reserving the bounded listing storage failed, or its actual capacity
+    /// would exceed the retained-output ceiling or changed unexpectedly.
+    AllocationRefused,
+    /// The kernel returned directory data that cannot be framed safely (or a
+    /// count larger than the buffer). Nothing, not even a valid prefix, is
+    /// kept.
+    MalformedDirectoryData,
+    /// The directory's original root-relative locator no longer binds the
+    /// held directory object (moved, renamed, replaced, removed, turned into
+    /// a link or mount). Never adopted.
+    DirectoryBindingChanged,
+    /// The ordinal does not name a candidate of this listing.
+    OrdinalOutOfRange,
+    /// A root binding, acquisition, handle-policy or system-call refusal.
+    Access(AccessError),
+}
+
+impl fmt::Display for EnumerationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("enumeration cancelled"),
+            Self::InvalidBudget => f.write_str("invalid enumeration budget"),
+            Self::AllocationRefused => f.write_str("enumeration storage refused"),
+            Self::MalformedDirectoryData => f.write_str("malformed directory data"),
+            Self::DirectoryBindingChanged => f.write_str("directory binding changed"),
+            Self::OrdinalOutOfRange => f.write_str("ordinal out of range"),
+            Self::Access(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl std::error::Error for EnumerationError {}
+
+impl From<AccessError> for EnumerationError {
+    fn from(error: AccessError) -> Self {
+        Self::Access(error)
+    }
+}

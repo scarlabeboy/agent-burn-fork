@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.96"
 publish = false
-description = "ABF M2A.1/M2A.2a: Linux x86_64 GNU (LP64) file-object pinning under an authorized root, and experimental readable promotion of a pin (synthetic research only)"
+description = "ABF M2A.1/M2A.2a/M2A.2b: Linux x86_64 GNU (LP64) file-object pinning under an authorized root, experimental readable promotion of a pin, and bounded single-directory enumeration (synthetic research only)"
 
 # Deliberately dependency-free: the only foreign code is glibc, through a
 # small documented ABI module (`src/sys/linux_x86_64.rs`).
@@ -13,8 +13,10 @@ description = "ABF M2A.1/M2A.2a: Linux x86_64 GNU (LP64) file-object pinning und
 [features]
 # Test-only harness: errno injection (openat2, readlinkat, synthetic pread),
 # procfs self-link payload, filesystem-magic and identity overrides, an
-# open_how log, fd counters, schedule hooks, descriptor-flag/offset probes
-# and the only byte-reading helper (bounded synthetic reads). The overrides
+# open_how log, fd counters and peak, schedule hooks, descriptor-flag/offset
+# probes, the only byte-reading helper (bounded synthetic reads) and, for
+# M2A.2b, a bounded getdents64 answer plan (forged directory data), an
+# allocation-refusal flag and a listing ledger probe. The overrides
 # can FORGE kernel evidence, so the feature is fail-closed: it compiles only
 # together with `--cfg abf_secure_fs_harness`, set deliberately for an
 # isolated synthetic test build. Without that cfg (for example with

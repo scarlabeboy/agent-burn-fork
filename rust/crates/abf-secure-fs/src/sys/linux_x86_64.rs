@@ -13,30 +13,46 @@
 //! - `EXT{2,3,4}_SUPER_MAGIC = 0xEF53`, `PROC_SUPER_MAGIC = 0x9FA0`:
 //!   `linux/magic.h`;
 //! - `__NR_readlinkat = 267`: `asm/unistd_64.h`;
+//! - `__NR_getdents64 = 217`: `asm/unistd_64.h` (M2A.2b);
+//! - `struct linux_dirent64` record framing (`getdents(2)`): `d_ino` u64 at
+//!   0, `d_off` i64 at 8, `d_reclen` u16 at 16, `d_type` u8 at 18, `d_name`
+//!   at 19. The record is parsed as bytes in safe code
+//!   (`crate::enumeration`); no struct is ever cast onto the buffer;
 //! - errno values: `asm-generic/errno-base.h` / `errno.h`
 //!   (`EWOULDBLOCK == EAGAIN == 11`).
 //!
 //! Compile-time assertions pin the struct sizes, alignments and field
 //! offsets. The unsafe operations are: the `openat2` system call, the
 //! transfer of its returned descriptor into an `OwnedFd`, `fstatfs`, the
-//! direct `readlinkat` system call (M2A.2a) and, in the test harness only,
-//! `fcntl(F_GETFL/F_GETFD)`.
+//! direct `readlinkat` system call (M2A.2a), the direct `getdents64` system
+//! call (M2A.2b) and, in the test harness only, `fcntl(F_GETFL/F_GETFD)`.
 //!
 //! Ownership invariant: a raw descriptor returned by the kernel is wrapped
 //! into an `OwnedFd` immediately, exactly once, before any other code runs,
 //! and then moved into exactly one typed owner: [`Fd`] (always an `O_PATH`
-//! descriptor), one of the private procfs capabilities built on it, or
-//! [`ReadableFd`] (the only descriptor type opened for reading). The owner
-//! closes it on drop (including on every error path and during unwinding,
-//! by ordinary Rust drop order). No function in this crate returns, accepts
-//! or stores a raw descriptor number outside this module's borrowed calls.
+//! descriptor), one of the private procfs capabilities built on it,
+//! [`DirectoryPinFd`] (an `O_PATH|O_DIRECTORY` directory pin built on it),
+//! [`ReadableFd`] (the only regular-file descriptor opened for reading) or
+//! [`DirectoryReadFd`] (the only directory descriptor opened for reading).
+//! The owner closes it on drop (including on every error path and during
+//! unwinding, by ordinary Rust drop order). No function in this crate
+//! returns, accepts or stores a raw descriptor number outside this module's
+//! borrowed calls.
+//!
+//! Source-path resolutions (every name resolved beneath a held directory:
+//! root, binding checks, regular-file pins, directory pins and the M2A.2b
+//! directory self-open) use the full mask `BENEATH|NO_SYMLINKS|
+//! NO_MAGICLINKS|NO_XDEV` (0x0F). The process-root anchor `/` uses 0x07
+//! (`BENEATH` rejects every absolute path). The only other masks are the
+//! private M2A.2a procfs exceptions below, which never resolve a source path.
 //!
 //! M2A.2a procfs exception (README, "Readable promotion"): the procfs opens
 //! below take **no** caller-supplied path, flags or descriptor number. Their
 //! names are constants or decimal numbers formatted here, and their
 //! `open_how` values are private constants. The relaxed terminal resolution
 //! (`resolve = 0`) exists only in [`open_readable_leaf`], whose directory
-//! argument can only come from the constant procfs chain.
+//! argument can only come from the constant procfs chain. Directory
+//! enumeration (M2A.2b) uses **no** procfs path and no relaxed mask.
 
 use std::ffi::{CStr, c_char, c_int, c_long};
 use std::fs::{File, Metadata};
@@ -77,6 +93,9 @@ const _: () = {
 const SYS_OPENAT2: c_long = 437;
 /// `__NR_readlinkat` on x86_64 LP64 (`asm/unistd_64.h:271`).
 const SYS_READLINKAT: c_long = 267;
+/// `__NR_getdents64` on x86_64 LP64 (`asm/unistd_64.h`). Not the x32 number
+/// (`__X32_SYSCALL_BIT + 217`).
+const SYS_GETDENTS64: c_long = 217;
 /// `AT_FDCWD` (`linux/fcntl.h`). Only used with the constant absolute "/".
 const AT_FDCWD: c_int = -100;
 
@@ -327,10 +346,12 @@ fn openat2_owned(dirfd: c_int, path: &CStr, how: &OpenHow) -> Result<OwnedFd, i3
     //   cannot be closed or reused meanwhile.
     // - The flags never include O_CREAT/O_TRUNC/O_TMPFILE/write access
     //   (memory safety does not depend on the flags). Every call except the
-    //   readable procfs leaf uses O_PATH, which does not open the object for
-    //   I/O. The leaf's O_RDONLY|O_NONBLOCK open is reached only for the
-    //   still-owned, previously type-checked regular source (see
-    //   `open_readable_leaf`).
+    //   readable procfs leaf and the directory self-open uses O_PATH, which
+    //   does not open the object for I/O. The leaf's O_RDONLY|O_NONBLOCK
+    //   open is reached only for the still-owned, previously type-checked
+    //   regular source (see `open_readable_leaf`); the directory self-open's
+    //   O_RDONLY|O_DIRECTORY open only for "." of a held directory pin (see
+    //   `open_directory_read`).
     let ret: c_long = unsafe {
         syscall(
             SYS_OPENAT2,
@@ -668,6 +689,181 @@ pub(crate) fn open_readable_leaf(dir: &ProcFdDir, source: &Fd) -> Result<Readabl
 }
 
 // ---------------------------------------------------------------------------
+// M2A.2b: directory pins, the private directory self-open and getdents64
+// ---------------------------------------------------------------------------
+
+/// Directory pin acquisition and directory binding re-resolution beneath the
+/// held root. Same flags and full mask as the root binding resolution.
+const DIRECTORY_PIN_HOW: OpenHow = OpenHow {
+    flags: O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+    mode: 0,
+    resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV,
+};
+
+/// The private self-open of a held directory pin: the literal `.`,
+/// read-only directory, full mask. No `O_PATH`: this is the only directory
+/// descriptor opened for reading. No write access, `O_CREAT`, `O_TRUNC` or
+/// `O_TMPFILE`; mode 0.
+const DIRECTORY_READ_HOW: OpenHow = OpenHow {
+    flags: O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
+    mode: 0,
+    resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV,
+};
+
+/// Size of the fixed `getdents64` output buffer.
+pub(crate) const DIRENT_BUFFER_BYTES: usize = 8192;
+
+/// What a directory pin resolves beneath the held root: the root itself
+/// (literal `.`) or a lexically validated relative path. Never a caller
+/// C string, never an absolute path.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DirectoryLocator<'a> {
+    HeldRoot,
+    Beneath(&'a crate::path::RelativePath),
+}
+
+/// An `O_PATH|O_DIRECTORY` pin of a directory, only produced by
+/// [`open_directory_pin`] (full mask beneath a held root). It is the only
+/// argument [`open_directory_read`] accepts: a generic [`Fd`], a procfs
+/// capability or a regular-file pin can never be self-opened for reading.
+/// `Debug` is opaque.
+pub(crate) struct DirectoryPinFd {
+    fd: Fd,
+}
+
+impl std::fmt::Debug for DirectoryPinFd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DirectoryPinFd(..)")
+    }
+}
+
+impl HandleMetadata for DirectoryPinFd {
+    fn metadata(&self) -> io::Result<Metadata> {
+        self.fd.metadata()
+    }
+}
+
+impl DirectoryPinFd {
+    pub(crate) fn filesystem_magic(&self) -> Result<i64, i32> {
+        filesystem_magic(&self.fd)
+    }
+}
+
+/// Sole owner of the one directory descriptor type opened for reading:
+/// `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK`, produced only by
+/// [`open_directory_read`]. Its only I/O is [`read_directory_entries`]
+/// (`getdents64`); no `File`, `Read`, `Seek` or raw descriptor leaves this
+/// module. `Debug` is opaque.
+pub(crate) struct DirectoryReadFd {
+    file: File,
+}
+
+impl std::fmt::Debug for DirectoryReadFd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DirectoryReadFd(..)")
+    }
+}
+
+impl HandleMetadata for DirectoryReadFd {
+    fn metadata(&self) -> io::Result<Metadata> {
+        self.file.metadata()
+    }
+}
+
+impl Drop for DirectoryReadFd {
+    fn drop(&mut self) {
+        // `self.file` closes the descriptor right after this body runs.
+        #[cfg(all(feature = "fault-injection", abf_secure_fs_harness))]
+        fault::note_closed();
+    }
+}
+
+/// One attempt: `O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, mode 0, full mask,
+/// beneath the held `root` directory. `HeldRoot` resolves the literal `.`
+/// (the held root object itself).
+pub(crate) fn open_directory_pin(
+    root: &Fd,
+    locator: DirectoryLocator<'_>,
+) -> Result<DirectoryPinFd, i32> {
+    let path = match locator {
+        DirectoryLocator::HeldRoot => c".",
+        DirectoryLocator::Beneath(relative) => relative.as_c_str(),
+    };
+    openat2_once(root.raw(), path, &DIRECTORY_PIN_HOW).map(|fd| DirectoryPinFd { fd })
+}
+
+/// One attempt: the private self-open of `pin`, with the immutable literal
+/// `.` and [`DIRECTORY_READ_HOW`] (full mask). `.` names the directory
+/// object held by `pin` itself, never a pathname that could have been
+/// rebound; `O_DIRECTORY` refuses any non-directory. The caller checks the
+/// pin before (S0) and both handles after (S1/S2).
+pub(crate) fn open_directory_read(pin: &DirectoryPinFd) -> Result<DirectoryReadFd, i32> {
+    let owned = openat2_owned(pin.fd.raw(), c".", &DIRECTORY_READ_HOW)?;
+    Ok(DirectoryReadFd {
+        file: File::from(owned),
+    })
+}
+
+/// Failure of one `getdents64` attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirentReadError {
+    Errno(i32),
+    /// The kernel reported more bytes than the buffer holds (or a count
+    /// that is not a valid length). Nothing is sliced.
+    Overlong,
+}
+
+/// One direct `getdents64(dir, buf, 8192)` system call. No libc wrapper, no
+/// retry, no buffer growth. Returns the checked byte count (`0` is EOF).
+pub(crate) fn read_directory_entries(
+    dir: &DirectoryReadFd,
+    buf: &mut [u8; DIRENT_BUFFER_BYTES],
+) -> Result<usize, DirentReadError> {
+    #[cfg(all(feature = "fault-injection", abf_secure_fs_harness))]
+    if let Some(injected) = fault::before_getdents(buf) {
+        return match injected {
+            Ok(ret) => dirent_count(ret),
+            Err(errno) => Err(DirentReadError::Errno(errno)),
+        };
+    }
+
+    let buf_ptr: *mut u8 = buf.as_mut_ptr();
+    // SAFETY:
+    // - `syscall` is the glibc variadic wrapper declared above; every
+    //   variadic argument is full register width (c_long, pointer, usize).
+    // - `dir.file` is a live descriptor owned by `dir`, which is borrowed for
+    //   the whole call, so it cannot be closed or reused meanwhile.
+    // - `buf_ptr` points to an exclusively borrowed, initialized array of
+    //   exactly `DIRENT_BUFFER_BYTES` bytes, and that exact count is passed:
+    //   the kernel writes at most that many bytes. No struct is cast onto it.
+    let ret: c_long = unsafe {
+        syscall(
+            SYS_GETDENTS64,
+            c_long::from(dir.file.as_raw_fd()),
+            buf_ptr,
+            DIRENT_BUFFER_BYTES,
+        )
+    };
+    if ret < 0 {
+        // Read errno immediately; nothing in between can overwrite it.
+        let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        return Err(DirentReadError::Errno(errno));
+    }
+    dirent_count(ret)
+}
+
+/// Checks the signed return before any conversion or slicing.
+fn dirent_count(ret: c_long) -> Result<usize, DirentReadError> {
+    let Ok(count) = usize::try_from(ret) else {
+        return Err(DirentReadError::Overlong);
+    };
+    if count > DIRENT_BUFFER_BYTES {
+        return Err(DirentReadError::Overlong);
+    }
+    Ok(count)
+}
+
+// ---------------------------------------------------------------------------
 // Harness-only descriptor probes (feature `fault-injection` AND
 // `--cfg abf_secure_fs_harness`). Default builds contain none of them.
 // ---------------------------------------------------------------------------
@@ -701,6 +897,13 @@ fn descriptor_status(file: &File) -> Result<(i32, i32), i32> {
 
 #[cfg(all(feature = "fault-injection", abf_secure_fs_harness))]
 impl Fd {
+    pub(crate) fn descriptor_status(&self) -> Result<(i32, i32), i32> {
+        descriptor_status(&self.file)
+    }
+}
+
+#[cfg(all(feature = "fault-injection", abf_secure_fs_harness))]
+impl DirectoryReadFd {
     pub(crate) fn descriptor_status(&self) -> Result<(i32, i32), i32> {
         descriptor_status(&self.file)
     }
@@ -748,13 +951,30 @@ impl ReadableFd {
 /// openat2, readlinkat or pread, replace the self-link payload, record the
 /// exact `open_how` of every attempt, override the reported filesystem magic
 /// or object identity (forged evidence, harness only), and count descriptor
-/// opens/closes. It has no way to change flags or masks.
+/// opens/closes. It has no way to change flags or masks. M2A.2b adds a
+/// **bounded** `getdents64` answer plan (at most [`MAX_DIRENT_PLAN`]
+/// entries, each batch at most one buffer), an allocation-refusal flag and
+/// the kernel status flags of the last directory read descriptor.
 #[cfg(all(feature = "fault-injection", abf_secure_fs_harness))]
 pub(crate) mod fault {
-    use super::{OpenHow, SELF_LINK_CAPACITY};
+    use super::{DIRENT_BUFFER_BYTES, OpenHow, SELF_LINK_CAPACITY};
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::ffi::c_long;
+
+    /// Largest accepted `getdents64` answer plan.
+    pub(crate) const MAX_DIRENT_PLAN: usize = 128;
+
+    /// A planned replacement for one `getdents64` call.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum DirentInjection {
+        Errno(i32),
+        /// Copied into the buffer; the returned count is its length
+        /// (at most one buffer).
+        Batch(Vec<u8>),
+        /// Returned as the raw signed count; the buffer is not written.
+        Return(i64),
+    }
 
     /// A planned replacement for one `readlinkat` call.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -776,6 +996,69 @@ pub(crate) mod fault {
         static LINK_CALLS: Cell<u64> = const { Cell::new(0) };
         static READ_PLAN: RefCell<VecDeque<Option<i32>>> = const { RefCell::new(VecDeque::new()) };
         static READ_CALLS: Cell<u64> = const { Cell::new(0) };
+        static DIRENT_PLAN: RefCell<VecDeque<Option<DirentInjection>>> = const { RefCell::new(VecDeque::new()) };
+        static DIRENT_CALLS: Cell<u64> = const { Cell::new(0) };
+        static REFUSE_ALLOCATION: Cell<bool> = const { Cell::new(false) };
+        static DIRECTORY_READ_STATUS: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
+        static PEAK: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Counts every getdents64 attempt and answers it from the plan, if a
+    /// planned entry is `Some`.
+    pub(crate) fn before_getdents(
+        buf: &mut [u8; DIRENT_BUFFER_BYTES],
+    ) -> Option<Result<c_long, i32>> {
+        DIRENT_CALLS.with(|c| c.set(c.get() + 1));
+        match DIRENT_PLAN.with(|p| p.borrow_mut().pop_front()).flatten()? {
+            DirentInjection::Errno(errno) => Some(Err(errno)),
+            DirentInjection::Batch(bytes) => {
+                // Bounded at plan time; re-checked here.
+                let len = bytes.len().min(DIRENT_BUFFER_BYTES);
+                buf[..len].copy_from_slice(&bytes[..len]);
+                Some(Ok(len as c_long))
+            }
+            DirentInjection::Return(ret) => Some(Ok(ret)),
+        }
+    }
+
+    /// Replaces the plan. Panics (harness misuse) above [`MAX_DIRENT_PLAN`]
+    /// entries or for a batch larger than one buffer.
+    pub(crate) fn set_dirent_plan(plan: &[Option<DirentInjection>]) {
+        assert!(plan.len() <= MAX_DIRENT_PLAN, "getdents plan too long");
+        assert!(
+            plan.iter().all(|entry| match entry {
+                Some(DirentInjection::Batch(bytes)) => bytes.len() <= DIRENT_BUFFER_BYTES,
+                _ => true,
+            }),
+            "getdents batch larger than the buffer"
+        );
+        DIRENT_PLAN.with(|p| *p.borrow_mut() = plan.iter().cloned().collect());
+    }
+
+    pub(crate) fn dirent_calls() -> u64 {
+        DIRENT_CALLS.with(Cell::get)
+    }
+
+    pub(crate) fn remaining_dirent_plan() -> usize {
+        DIRENT_PLAN.with(|p| p.borrow().len())
+    }
+
+    /// Makes the next enumeration storage reservation fail.
+    pub(crate) fn set_refuse_allocation(refuse: bool) {
+        REFUSE_ALLOCATION.with(|r| r.set(refuse));
+    }
+
+    /// Consumes the allocation-refusal flag.
+    pub(crate) fn take_refuse_allocation() -> bool {
+        REFUSE_ALLOCATION.with(|r| r.replace(false))
+    }
+
+    pub(crate) fn note_directory_read_status(status: Option<(i32, i32)>) {
+        DIRECTORY_READ_STATUS.with(|s| s.set(status));
+    }
+
+    pub(crate) fn directory_read_status() -> Option<(i32, i32)> {
+        DIRECTORY_READ_STATUS.with(Cell::get)
     }
 
     /// Counts every readlinkat attempt and answers it from the plan, if a
@@ -838,6 +1121,24 @@ pub(crate) mod fault {
 
     pub(crate) fn note_opened() {
         OPENED.with(|c| c.set(c.get() + 1));
+        let live = OPENED
+            .with(Cell::get)
+            .saturating_sub(CLOSED.with(Cell::get));
+        PEAK.with(|p| p.set(p.get().max(live)));
+    }
+
+    /// Highest number of descriptors wrapped on this thread and not yet
+    /// closed, since the last reset (or [`reset_peak`]).
+    pub(crate) fn peak() -> u64 {
+        PEAK.with(Cell::get)
+    }
+
+    /// Restarts the high-water mark from the currently live count.
+    pub(crate) fn reset_peak() {
+        let live = OPENED
+            .with(Cell::get)
+            .saturating_sub(CLOSED.with(Cell::get));
+        PEAK.with(|p| p.set(live));
     }
 
     pub(crate) fn note_closed() {
@@ -875,5 +1176,10 @@ pub(crate) mod fault {
         LINK_CALLS.with(|c| c.set(0));
         set_read_plan(&[]);
         READ_CALLS.with(|c| c.set(0));
+        set_dirent_plan(&[]);
+        DIRENT_CALLS.with(|c| c.set(0));
+        set_refuse_allocation(false);
+        note_directory_read_status(None);
+        PEAK.with(|p| p.set(0));
     }
 }

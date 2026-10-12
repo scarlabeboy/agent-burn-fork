@@ -159,7 +159,7 @@ fn capability_is_described_honestly() {
     let caps = BackendCapabilities::compiled();
     assert!(caps.readable_promotion);
     assert!(caps.metadata_pinning);
-    assert!(!caps.directory_enumeration && !caps.environment_attested);
+    assert!(caps.directory_enumeration && !caps.environment_attested);
 }
 
 #[test]

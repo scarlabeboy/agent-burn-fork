@@ -47,25 +47,99 @@ pub struct RelativePath {
 impl RelativePath {
     /// Validates `relative`. Never panics on malformed input.
     pub fn new(relative: &str) -> Result<Self, PathError> {
-        if relative.is_empty() {
-            return Err(PathError::Empty);
-        }
-        if relative.len() > MAX_RELATIVE_BYTES {
-            return Err(PathError::TooLong);
-        }
-        if relative.contains(['\\', ':']) {
-            return Err(PathError::CrossOsSeparator);
-        }
-        if relative.starts_with('/') {
-            return Err(PathError::Absolute);
-        }
-        check_components(relative, MAX_RELATIVE_COMPONENTS)?;
+        check_relative(relative)?;
         let c_path = CString::new(relative).map_err(|_| PathError::InvalidCharacter)?;
         Ok(Self { c_path })
     }
 
     pub(crate) fn as_c_str(&self) -> &CStr {
         &self.c_path
+    }
+
+    /// The validated spelling, without the terminating NUL.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        self.c_path.as_bytes()
+    }
+
+    /// Heap bytes owned by this path: the exact boxed C string, including
+    /// its NUL (`CString` stores a `Box<[u8]>` of exactly that length).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.c_path.as_bytes_with_nul().len()
+    }
+}
+
+/// The acceptance rules of [`RelativePath::new`], in the same order,
+/// without allocating. Every rule is unchanged. (`CString::new` in `new`
+/// can only fail on NUL, which the control-character rule already refuses.)
+pub(crate) fn check_relative(relative: &str) -> Result<(), PathError> {
+    if relative.is_empty() {
+        return Err(PathError::Empty);
+    }
+    if relative.len() > MAX_RELATIVE_BYTES {
+        return Err(PathError::TooLong);
+    }
+    if relative.contains(['\\', ':']) {
+        return Err(PathError::CrossOsSeparator);
+    }
+    if relative.starts_with('/') {
+        return Err(PathError::Absolute);
+    }
+    check_components(relative, MAX_RELATIVE_COMPONENTS)
+}
+
+/// Capacity of the fixed join scratch: the longest relative path plus a NUL.
+pub(crate) const JOIN_SCRATCH_BYTES: usize = MAX_RELATIVE_BYTES + 1;
+
+/// A fixed, zero-initialized buffer holding `parent/` (or nothing, for the
+/// root directory) followed by one child name, to check the joined
+/// root-relative spelling with [`check_relative`] **without allocating**.
+/// It never escapes the crate and has an opaque `Debug`.
+pub(crate) struct JoinScratch {
+    buf: [u8; JOIN_SCRATCH_BYTES],
+    prefix: usize,
+}
+
+impl fmt::Debug for JoinScratch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("JoinScratch(..)")
+    }
+}
+
+impl JoinScratch {
+    /// `parent` is a validated directory locator (`None` for the root). A
+    /// validated parent has at most 1024 bytes, so `parent/` always fits the
+    /// 1025-byte buffer; when it leaves no room, every join is `TooLong`.
+    pub(crate) fn new(parent: Option<&RelativePath>) -> Self {
+        let mut scratch = Self {
+            buf: [0; JOIN_SCRATCH_BYTES],
+            prefix: 0,
+        };
+        if let Some(parent) = parent {
+            let bytes = parent.as_bytes();
+            let len = bytes.len().min(MAX_RELATIVE_BYTES);
+            scratch.buf[..len].copy_from_slice(&bytes[..len]);
+            scratch.buf[len] = b'/';
+            scratch.prefix = len + 1;
+        }
+        scratch
+    }
+
+    /// Joins `name` after the prefix and returns the joined spelling if it
+    /// passes [`check_relative`]. Bounded: at most 1024 bytes are copied and
+    /// checked. The scratch is reused; nothing is retained.
+    pub(crate) fn join(&mut self, name: &[u8]) -> Result<&str, PathError> {
+        let end = self
+            .prefix
+            .checked_add(name.len())
+            .ok_or(PathError::TooLong)?;
+        if end > MAX_RELATIVE_BYTES {
+            return Err(PathError::TooLong);
+        }
+        self.buf[self.prefix..end].copy_from_slice(name);
+        let joined =
+            std::str::from_utf8(&self.buf[..end]).map_err(|_| PathError::InvalidCharacter)?;
+        check_relative(joined)?;
+        Ok(joined)
     }
 }
 

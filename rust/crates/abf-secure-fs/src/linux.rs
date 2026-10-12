@@ -18,12 +18,15 @@
 //!    the held handle. The link count is therefore enforced on three samples:
 //!    acquisition, verification and final inspection.
 //!
-//! No step reads file contents, enumerates a directory, or opens an object
-//! for I/O. No step has a fallback: an unavailable primitive or flag is an
-//! error, and the flags are `const` values that no code path modifies.
+//! No step here reads file contents, enumerates a directory, or opens an
+//! object for I/O. No step has a fallback: an unavailable primitive or flag
+//! is an error, and the flags are `const` values that no code path modifies.
 //! Readable promotion of a pin (M2A.2a) is a separate protocol in
 //! `crate::promotion`; it reuses the process-root constant and the bounded
-//! retry helper here without changing them.
+//! retry helper here without changing them. Directory pinning and bounded
+//! enumeration (M2A.2b) are a separate protocol in `crate::directory`; it
+//! uses [`Root::open_directory_pin`] (full mask, beneath the held root) and
+//! the unchanged [`Root::check_binding`] and [`Root::pin_regular`].
 //!
 //! What establishes what (README, "Security contract"):
 //!
@@ -39,9 +42,10 @@
 use crate::error::{AccessError, ObjectKind};
 use crate::path::{RelativePath, RootPath, parse_root};
 use crate::sys::linux_x86_64::{
-    self as sys, E2BIG, EACCES, EAGAIN, EINTR, EINVAL, ELOOP, ENOENT, ENOSYS, ENOTDIR, EPERM,
-    EXDEV, EXT_SUPER_MAGIC, Fd, HandleMetadata, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_PATH,
-    OpenHow, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV,
+    self as sys, DirectoryLocator, DirectoryPinFd, E2BIG, EACCES, EAGAIN, EINTR, EINVAL, ELOOP,
+    ENOENT, ENOSYS, ENOTDIR, EPERM, EXDEV, EXT_SUPER_MAGIC, Fd, HandleMetadata, O_CLOEXEC,
+    O_DIRECTORY, O_NOFOLLOW, O_PATH, OpenHow, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS,
+    RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV,
 };
 use crate::{FileEvidence, ObjectId};
 use std::ffi::CStr;
@@ -362,6 +366,17 @@ impl Root {
             evidence,
         ))
     }
+
+    /// M2A.2b: one attempt to acquire a directory pin beneath the **held
+    /// root** (`O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, full mask). The
+    /// held root descriptor itself never leaves this module; the caller
+    /// (`crate::directory`) bounds retries and applies the directory policy.
+    pub(crate) fn open_directory_pin(
+        &self,
+        locator: DirectoryLocator<'_>,
+    ) -> Result<DirectoryPinFd, i32> {
+        sys::open_directory_pin(&self.root, locator)
+    }
 }
 
 impl Pinned {
@@ -440,6 +455,35 @@ pub(crate) mod schedule {
         ReadBeforeRead,
         /// Synthetic read: after the read, before the post-read checks.
         ReadAfterRead,
+        /// Directory pin: before its first root binding check.
+        DirectoryPinBeforeBindingCheck,
+        /// Directory pin: acquired and admitted, before verification.
+        DirectoryPinAfterAcquire,
+        /// Directory pin: verified, before the final root binding check.
+        DirectoryPinAfterVerify,
+        /// Enumeration: storage reserved, before the start binding check.
+        EnumerateBeforeStartCheck,
+        /// Enumeration: after S0, before the private `.` read open.
+        EnumerateBeforeReadOpen,
+        /// Enumeration: read handle owned, before its S1 sample.
+        EnumerateAfterReadOpen,
+        /// Enumeration: after S2, before the post-open binding check.
+        EnumerateAfterS2,
+        /// Enumeration: after every `getdents64` attempt, before its
+        /// binding check.
+        EnumerateAfterAttempt,
+        /// Enumeration: read handle closed, before the final binding check.
+        EnumerateBeforeFinalCheck,
+        /// Enumeration: after the final binding check, before release.
+        EnumerateBeforeRelease,
+        /// Child authorization: before the pre-pin binding check.
+        ChildBeforeBindingCheck,
+        /// Child authorization: after the pre-pin binding check, before the
+        /// root-relative `pin_regular`.
+        ChildBeforePin,
+        /// Child authorization: after `pin_regular`, before the post-pin
+        /// binding check.
+        ChildAfterPin,
     }
 
     type Hook = Box<dyn FnMut(SchedulePoint)>;
