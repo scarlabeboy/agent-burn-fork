@@ -42,6 +42,14 @@
 //!   private types, F16-1). The default API exposes no way to read bytes;
 //!   only the two-key test harness has a bounded synthetic read. See
 //!   `README.md`, "Readable promotion".
+//! - **Research bounded read (ABF28):** only in the deliberate two-key
+//!   research build (feature `fault-injection` **and** `--cfg
+//!   abf_secure_fs_harness`), `ReadableRegularFile::research_read_prefix`
+//!   consumes a promoted file and an opaque one-use research permit and
+//!   observes one bounded prefix from offset 0 (module `research_read`).
+//!   Default and feature-only builds have **no** content reader. The keys
+//!   are a research access boundary, not proof that bytes are synthetic and
+//!   not consent for real files. See `README.md`, "Research bounded read".
 //! - **Confinement comes from the kernel:** every resolution of a source
 //!   path beneath a held directory (root, binding checks, file and
 //!   directory pins, the directory self-open) uses `openat2` with the
@@ -154,6 +162,61 @@ mod imp {
     pub(crate) use crate::directory::{Directory, Listing, Target as DirectoryPinTarget};
     pub(crate) use crate::linux::{Pinned, Root};
     pub(crate) use crate::promotion::Readable;
+}
+
+// ABF28: the bounded synthetic read transaction exists ONLY when both
+// deliberate research keys are active (feature `fault-injection` AND
+// `--cfg abf_secure_fs_harness`) on the supported target. Default builds,
+// feature-only builds (a compile error above) and every unsupported selector
+// contain no content reader.
+#[cfg(all(
+    feature = "fault-injection",
+    abf_secure_fs_harness,
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    not(target_abi = "x32"),
+    not(abf_secure_fs_force_unsupported)
+))]
+mod read;
+
+/// ABF28 research read surface: **two-key research builds only** (feature
+/// `fault-injection` **and** `--cfg abf_secure_fs_harness`, supported
+/// target). Absent from default and feature-only builds.
+///
+/// One transaction ([`ReadableRegularFile::research_read_prefix`]) consumes
+/// one promoted file and one opaque one-use [`research_read::ResearchReadPermit`]
+/// and observes one prefix from offset 0 under fixed hard budgets (4096
+/// bytes per `pread64`, 65536 captured/returned, 262144 requested, 64
+/// attempts, 2 consecutive / 8 total `EINTR` retries, 132 direct `fstat`,
+/// one fixed 65536-byte stage, 2 held descriptors). Bytes become reachable
+/// only through a released [`research_read::PrefixObservation`]; every
+/// refusal returns a code and **no** byte.
+///
+/// Research policy A only: held-object authority (A23-2), not root
+/// membership, lineage, origin, immutable content or user consent. Enabling
+/// the keys does not prove that a file holds synthetic bytes. See
+/// `README.md`, "Research bounded read (ABF28)".
+#[cfg(all(
+    feature = "fault-injection",
+    abf_secure_fs_harness,
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    not(target_abi = "x32"),
+    not(abf_secure_fs_force_unsupported)
+))]
+pub mod research_read {
+    pub use crate::error::ResearchReadError;
+    pub use crate::read::{
+        Coherence, HELD_DESCRIPTORS, MAX_CAPTURE_BYTES, MAX_CONSECUTIVE_EINTR_RETRIES,
+        MAX_CONTROL_BYTES, MAX_FSTAT_ATTEMPTS, MAX_PREAD_ATTEMPTS, MAX_REQUEST_BYTES,
+        MAX_REQUESTED_BYTES, MAX_RETAINED_BYTES, MAX_TOTAL_EINTR_RETRIES, ObservationEnd,
+        PrefixObservation, ReadBudget, ReadBudgetKind, ReadCounters, ResearchReadPermit,
+        STAGE_CAPACITY_BYTES,
+    };
 }
 
 pub use enumeration::{
@@ -752,11 +815,14 @@ mod imp {
 /// exists only in a deliberate harness build. It cannot change any open flag
 /// or resolve mask. All state is thread-local.
 ///
-/// The same two keys also compile the only byte-reading entry point,
+/// The same two keys also compile the crate's two byte-reading entry points,
+/// both for synthetic test files only: the older per-call helper
 /// [`ReadableRegularFile::harness_read_at`] (at most
-/// [`fault_injection::MAX_SYNTHETIC_READ`] bytes per call), and descriptor
-/// probes (status flags, offsets) used to verify the promotion against the
-/// real kernel.
+/// [`fault_injection::MAX_SYNTHETIC_READ`] bytes per call) and the ABF28
+/// research transaction `ReadableRegularFile::research_read_prefix`; plus
+/// descriptor probes (status flags, offsets) used to verify the promotion
+/// against the real kernel. Neither is a normal reader or production
+/// consent, and no other build compiles either.
 #[cfg(all(
     feature = "fault-injection",
     abf_secure_fs_harness,
@@ -1015,7 +1081,102 @@ pub mod fault_injection {
         crate::linux::schedule::clear();
     }
 
-    /// Clears the plans, log, overrides, counters and hook.
+    // -- ABF28 research read coordinator and instrumentation -----------------
+
+    pub use crate::sys::linux_x86_64::fault::{
+        PreadInjection, ReadEvent, StatInjection, StatOverride,
+    };
+
+    /// Largest accepted [`inject_pread`] plan.
+    pub const MAX_PREAD_PLAN: usize = fault::MAX_PREAD_PLAN;
+    /// Largest accepted [`inject_fstat`] plan.
+    pub const MAX_FSTAT_PLAN: usize = fault::MAX_STAT_PLAN;
+
+    /// The research coordinator's only way to obtain a
+    /// [`crate::research_read::ResearchReadPermit`]. No input: a permit is
+    /// never derived from an identity, ordinal, name or token. `None` while
+    /// another permit minted on this thread is alive (at most one research
+    /// operation at a time per thread; no queue).
+    pub fn mint_research_read_permit() -> Option<crate::research_read::ResearchReadPermit> {
+        crate::read::ResearchReadPermit::mint()
+    }
+
+    /// Plan for the next research-read `pread64` attempts on this thread.
+    /// Panics above [`MAX_PREAD_PLAN`] entries (bounded harness state).
+    pub fn inject_pread(plan: &[Option<PreadInjection>]) {
+        fault::set_pread_plan(plan);
+    }
+
+    /// Research-read `pread64` attempts (real or injected) since the last
+    /// reset.
+    pub fn pread_attempts() -> u64 {
+        fault::pread_calls()
+    }
+
+    pub fn remaining_pread_injections() -> usize {
+        fault::remaining_pread_plan()
+    }
+
+    /// Plan for the next research-read direct `fstat` attempts on this
+    /// thread. Panics above [`MAX_FSTAT_PLAN`] entries.
+    pub fn inject_fstat(plan: &[Option<StatInjection>]) {
+        fault::set_stat_plan(plan);
+    }
+
+    /// Research-read direct `fstat` attempts (real or injected) since the
+    /// last reset.
+    pub fn fstat_attempts() -> u64 {
+        fault::stat_calls()
+    }
+
+    pub fn remaining_fstat_injections() -> usize {
+        fault::remaining_stat_plan()
+    }
+
+    /// The next research-read stage allocation on this thread fails.
+    pub fn refuse_next_read_stage() {
+        fault::set_refuse_read_stage(true);
+    }
+
+    /// Stage allocation ledger of this thread since the last reset.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ReadStageLedger {
+        /// Numeric address of the most recently allocated stage, for the
+        /// same-allocation transfer check. Deliberately exposed test
+        /// instrumentation of this two-key harness only: a plain `usize`,
+        /// not a pointer or byte view, and the safe API offers no way to
+        /// dereference it (only `unsafe` caller code, outside the harness
+        /// trust boundary, could). The crate never dereferences it.
+        pub last_address: usize,
+        pub allocations: u64,
+        pub disposals: u64,
+        /// Whether the most recently disposed stage held only zeros right
+        /// before it was freed (the best-effort zero fill ran).
+        pub last_disposal_zeroed: Option<bool>,
+    }
+
+    pub fn read_stage_ledger() -> ReadStageLedger {
+        let (last_address, allocations, disposals, last_disposal_zeroed) =
+            fault::read_stage_ledger();
+        ReadStageLedger {
+            last_address,
+            allocations,
+            disposals,
+            last_disposal_zeroed,
+        }
+    }
+
+    /// Runs `hook` synchronously at every [`ReadEvent`] on this thread.
+    /// The hook must not set or clear the read hook itself.
+    pub fn set_read_event_hook(hook: impl FnMut(ReadEvent) + 'static) {
+        fault::set_read_event_hook(Box::new(hook));
+    }
+
+    pub fn clear_read_event_hook() {
+        fault::clear_read_event_hook();
+    }
+
+    /// Clears the plans, log, overrides, counters and hooks.
     pub fn reset() {
         fault::reset();
         crate::linux::schedule::clear();
@@ -1035,8 +1196,11 @@ pub mod fault_injection {
     not(abf_secure_fs_force_unsupported)
 ))]
 impl ReadableRegularFile {
-    /// The only byte-reading entry point of the crate, for synthetic test
-    /// files: one positioned read of at most `limit` bytes
+    /// The older of the crate's two two-key byte-reading entry points (the
+    /// other is the ABF28 research transaction
+    /// [`ReadableRegularFile::research_read_prefix`], with its own permit
+    /// and budgets; this helper predates it and is not governed by them),
+    /// for synthetic test files: one positioned read of at most `limit` bytes
     /// (`1..=MAX_SYNTHETIC_READ`) at `offset`, staged in a fixed buffer.
     /// Both handles are checked before and after; bytes are returned only
     /// if the post-checks pass. A short read is returned as short (it says
@@ -1081,6 +1245,38 @@ impl ReadableRegularFile {
     /// nothing. Returns the new offset.
     pub fn harness_seek(&self, to: u64) -> u64 {
         self.inner.seek_to(to).expect("lseek on readable")
+    }
+
+    /// ABF28 research transaction (two-key research builds only): one
+    /// bounded observation of the prefix of this file starting at offset 0.
+    ///
+    /// **Consumes** this capability and `permit` in every outcome. Order:
+    /// budget, cancellation, both entry samples (direct `fstat` of the
+    /// original and the readable handle: regular file, the pinned non-zero
+    /// identity, `nlink == 1`, equal size/mtime/ctime), one fixed 65536-byte
+    /// stage; then up to the budgets, positive `pread64` requests into the
+    /// private stage, each followed by **both** samples (also after `EINTR`,
+    /// errors, end of file or an impossible count); finally both samples
+    /// again, a last cancellation poll, closing both descriptors, and the
+    /// same stage moves into the [`research_read::PrefixObservation`].
+    ///
+    /// Only a zero return from a positive request is
+    /// [`research_read::ObservationEnd::ObservedEof`]; a filled capture is
+    /// `CaptureLimit` (no lookahead), an exhausted credit `BudgetStop`. The
+    /// coherence is always `MutableObservation` (no snapshot). Every
+    /// refusal ([`research_read::ResearchReadError`]) returns no byte.
+    ///
+    /// Held-object authority (A23-2, research policy A): the object may
+    /// already be outside the root; nothing here claims membership,
+    /// lineage, origin, immutable content or consent for real files. Reading
+    /// can update atime and generate notifications.
+    pub fn research_read_prefix(
+        self,
+        permit: research_read::ResearchReadPermit,
+        budget: research_read::ReadBudget,
+        cancel: &Cancellation,
+    ) -> Result<research_read::PrefixObservation, research_read::ResearchReadError> {
+        crate::read::research_read_prefix(self.inner, permit, budget, cancel)
     }
 }
 

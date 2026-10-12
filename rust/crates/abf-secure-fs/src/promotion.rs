@@ -58,6 +58,8 @@ use crate::error::AccessError;
 use crate::linux::{
     Inspection, MAX_OPEN_ATTEMPTS, OpenFailure, Pinned, classify, classify_errno, inspect,
 };
+#[cfg(all(feature = "fault-injection", abf_secure_fs_harness))]
+use crate::sys::linux_x86_64::Fd;
 use crate::sys::linux_x86_64::admission::{
     AdmissionRefusal, AdmittedFdDir, AdmittedRegularSource, AdmittedSelfLink, CurrentTask,
     ProcessRoot, TaskRefusal,
@@ -307,6 +309,14 @@ impl Readable {
         schedule_point!(ReadAfterRead);
         self.reinspect().map_err(SyntheticReadFailure::Access)?;
         Ok(stage[..count.min(limit)].to_vec())
+    }
+
+    /// ABF28: the two held owners and the pinned identity, borrowed for the
+    /// research read transaction (`crate::read`), which consumes this
+    /// capability and drops it (closing both) before releasing any byte.
+    /// No descriptor leaves the crate.
+    pub(crate) fn reader_owners(&self) -> (&ReadableFd, &Fd, ObjectId) {
+        (&self.readable, self.pinned.handle(), self.pinned.id())
     }
 
     pub(crate) fn readable_status(&self) -> Result<(i32, i32), i32> {

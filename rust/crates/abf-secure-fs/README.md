@@ -1,4 +1,4 @@
-# abf-secure-fs (ABF M2A.1 + M2A.2a + M2A.2b)
+# abf-secure-fs (ABF M2A.1 + M2A.2a + M2A.2b + ABF28 research read)
 
 Secure **Linux file-object pinning** under an authorized root (metadata
 only), **experimental readable promotion** of a pinned file, and **bounded
@@ -21,9 +21,14 @@ Status:
   cancellation (F18-6), failure-ownership (F19-3) and held-object authority
   (A23-2) documentation. No reader was added. It requires an independent
   read-only security review before any use.
+- Research bounded read (conversation ABF28, following the ABF25 design
+  under research policy A): a one-shot bounded **synthetic** read
+  transaction that exists **only** in the deliberate two-key research build.
+  Implementation candidate; it requires an independent read-only security
+  review before any use. See "Research bounded read (ABF28)".
 
 **Production collection: BLOCKED.** The default API reads no file contents
-(only the two-key test harness can read bounded synthetic bytes), enumerates
+(only the two-key research/test build can read bounded synthetic bytes), enumerates
 one explicitly pinned directory at a time without recursion, has no Windows
 backend and is not integrated with the M1 boundary
 (`abf-collection-boundary`), any scanner, parser or application.
@@ -508,6 +513,189 @@ Names, locators and descriptors never leave the crate. `Debug`/`Display`
 show only object identities, counts, statuses and fixed codes. Counters
 reveal directory cardinality and rejection facts by design.
 
+## Research bounded read (ABF28, two-key synthetic research only)
+
+`ReadableRegularFile::research_read_prefix(self, permit, budget, &cancel)`
+and the module `research_read` exist **only** when both deliberate research
+keys are active: the Cargo feature `fault-injection` **and** `--cfg
+abf_secure_fs_harness`, on the supported target. Default builds have no
+content reader; a feature-only build does not compile (`compile_error!`);
+GNU x32, other targets and `--cfg abf_secure_fs_force_unsupported` compile
+no reader at all. The two keys are a **research access boundary**: they do
+not prove that a file holds synthetic bytes, and they are not user consent
+for real files. Only synthetic fixtures created by the tests themselves are
+read.
+
+### Authority (research policy A)
+
+One transaction consumes:
+
+1. one already-promoted `ReadableRegularFile` (its two held descriptors and
+   the pinned identity), and
+2. one opaque `ResearchReadPermit`: not `Clone`/`Copy`/`Default`, no
+   public field or constructor, `!Send`/`!Sync`, minted only by the harness
+   coordinator `fault_injection::mint_research_read_permit()` (no input: it
+   is never derived from an `ObjectId`, ordinal, name or token), at most one
+   outstanding per thread (no queue).
+
+Both are consumed in every outcome. The permit is research operation
+authorization only. Exactly as for promotion (A23-2), the held object may
+already be outside the root (moved out before or after promotion, root
+capability dropped, root directory removed); the transaction reads it
+anyway and claims **no** current or continuous root membership, original
+directory lineage, content authenticity, immutable contents or consent for
+real files. There is no multi-file coordinator, permit queue, continuation
+or cumulative orchestration.
+
+### Transaction
+
+| Phase | Action |
+|---|---|
+| Entry | validate the budget; poll cancellation (already requested: refusal, no sample, no allocation, no read); direct `fstat` of the original `O_PATH` handle **and** of the readable handle; allocate the one fixed stage |
+| Before each attempt | poll cancellation; check credits; positive request `min(request, remaining capture, remaining requested bytes)`; checked signed offset (starts at 0, advances only by a valid positive count); charge the attempt and the requested bytes **before** the system call (checked, never refunded), only while the post pair and the final pair of `fstat` credits stay reserved |
+| Attempt | one direct `pread64` into the unused window of the private stage |
+| After each returned attempt | keep the raw result; debit the pair's two `fstat` credits, then direct `fstat` of **both** owners and keep both raw results (the second even if the first failed, also after `EINTR`, `EAGAIN`, fatal errors, EOF and impossible counts); then the precedence below |
+| Release | both final samples, final cancellation poll, close both descriptors, move the **same** stage allocation into the `PrefixObservation` |
+
+Entry/post/final sample policy (both owners): regular file, concrete
+non-zero `(dev, ino)` equal to the pinned identity, `nlink == 1`, valid
+size and timestamps, and an equal `(size, mtime, ctime)` change detector
+across both owners and against the entry baseline. atime is excluded
+(reading can update it). Reading beyond the baseline size, or an end of
+file before it, is also a change.
+
+Per-attempt precedence: a kernel-contract violation detected in the read
+**or** in either post sample; fatal read error (terminal
+`EAGAIN`/`EWOULDBLOCK` included: never retried, waited for or reopened);
+ordinary post-sample refusal (original owner, then readable, then the
+detector); `EINTR` retry exhaustion; cancellation; budget stop; ordinary
+progress or end of file. A fatal read error stays primary over ordinary
+post refusals (they still run), but not over a post-sample contract
+violation. The entry and final pairs likewise rank a contract violation of
+either owner before any ordinary refusal, so an ordinary refusal of the
+original owner never masks a contract violation of the readable one.
+
+Accounting (ABF30): every counter (attempts, requested bytes, prefix
+length, `EINTR` counts, `fstat` credits) is updated with checked
+arithmetic, all-or-nothing; an accounting failure refuses with
+`InvalidBudget` and no byte, never wraps or saturates. Credits are debited
+**before** the action they pay for and never refunded (`EINTR`, EOF,
+errors and early refusals included). They are charges, not proof that a
+call ran: a panic between two actions can leave a credit charged for a
+call that never happened.
+
+### Hard budgets (per transaction = one file = one prefix from offset 0)
+
+| Resource | Ceiling |
+|---|---|
+| `pread64` request | 1..=4096 bytes |
+| captured / returned bytes | 65536 |
+| requested I/O (charged before each attempt) | 262144 bytes |
+| `pread64` attempts (incl. `EINTR`, errors, EOF) | 64 |
+| `EINTR` retry grants | 2 consecutive, 8 total (the third consecutive / ninth is `RetryExhausted`) |
+| direct `fstat` attempts | 132 = 2 entry + 2 per returned attempt + 2 final (debited per pair before its first call; the final pair stays reserved) |
+| allocations | one fixed, zero-initialized 65536-byte stage (checked layout, fallible) |
+| explicit inline/control storage | ≤ 4096 bytes (624 on the reviewed target, compile-time checked) |
+| retained payload + control | ≤ 69632 bytes |
+| additional read scratch | 0 (the kernel writes into the stage) |
+| descriptors | the 2 already-promoted owners; 0 opened or duplicated; ≤ 2 closes before release |
+
+`ReadBudget::new` rejects zero and above-ceiling values; a caller can only
+lower them. The counters bound userspace attempts and explicit storage, not
+wall-clock time, kernel memory, allocator overhead, global RSS or resources
+owned elsewhere in the process. A filled capture without a genuine
+zero-byte read is `CaptureLimit`, never EOF; no lookahead read is made.
+
+### Direct ABI (two-key builds only)
+
+`pread64` (syscall 17) and `fstat` (syscall 5) are direct one-shot calls in
+the ABI module (GNU LP64 x86_64 only; x32 numbers excluded), verified
+against the installed `asm/unistd_64.h`, `asm/stat.h` (kernel `struct stat`,
+144 bytes, layout asserted at compile time) and `asm-generic/posix_types.h`.
+No `FileExt`, `read_exact`, `read_to_end`, `statx` fallback or userspace
+retry exists in the transaction. The stage is one `alloc_zeroed` of exactly
+`Layout::new::<[u8; 65536]>()` owned by a `Box` (null: `AllocationRefused`);
+no owned pointer, raw descriptor or mutable byte view leaves the crate.
+The one deliberate exception is test instrumentation: the two-key harness
+`fault_injection::read_stage_ledger()` reports the stage's numeric address
+(`last_address: usize`) for the same-allocation check. It is a plain
+number, not a pointer or byte view; the safe API cannot dereference it, and
+only `unsafe` caller code outside the harness trust boundary could. Normal
+builds contain neither the harness nor the reader.
+
+### Outcomes
+
+A released `PrefixObservation` exposes the bytes, length, end reason,
+coherence, held-object identity and numeric counters:
+
+- `ObservedEof`: a positive request actually returned 0 at the advanced
+  offset (a sampled event, not durable EOF or complete usage);
+- `CaptureLimit`: the capture budget was filled (incomplete, even if the
+  file is exactly that long);
+- `BudgetStop(Attempts | RequestedBytes)`: incomplete;
+- coherence is always `MutableObservation` (snapshot not established).
+
+There is no `Complete`, `VerifiedOrigin` or `ImmutableSnapshot` state. Every
+refusal (`ResearchReadError`: `InvalidBudget`, `Cancelled`,
+`AllocationRefused`, `KernelContractViolation`, `ReadFailed`, `WouldBlock`,
+`RetryExhausted`, `Metadata`, `InvalidMetadata`, `ContentChanged`) returns a
+fixed code and **no** byte, never a partial prefix; it never means "empty"
+or "zero usage". Cancellation never releases a partial prefix.
+
+### Confidentiality and disposal
+
+The stage stays private until release: no callback, stream, iterator,
+`Debug`/`Display`, panic text, error field or serialization exposes it. The
+transaction itself logs nothing: its errors are fixed codes and the
+`Debug` of the permit, budget, observation and counters show no bytes,
+names, absolute or procfs paths. That statement covers the reader, not
+every test diagnostic: a **failing** test assertion can print the
+deterministic synthetic bytes it compared (model arrays in the pure unit
+tests, test-written fixture patterns in the native tests). Since ABF30 the
+unit tests' refusal checks report only a released length, but byte
+equality checks still print both sides when they fail. No real file
+content is used in any test. On refusal, unwinding and
+when a released observation is dropped, both descriptors are closed and the
+whole stage is overwritten with zeros (bounded volatile fill) before it is
+freed. That is best effort, **not** secure erasure: allocator internals,
+freed pages, swap, core dumps and hostile same-process code are outside the
+claim; abort, OOM-abort and kill do not run destructors.
+
+### Limitations
+
+- Metadata equality is a change detector, not an atomic snapshot: a change
+  made and restored between samples, a same-size rewrite within the
+  filesystem's timestamp granularity, changes after the final sample and a
+  mixed version read inside one system call can go undetected. Observed
+  changes refuse the whole stage; undetected changes remain possible.
+- A rename of the held object during the transaction changes its ctime on
+  the tested ext4 and is refused as `ContentChanged`; a move before entry is
+  accepted (policy A).
+- Read side effects are not zero: atime updates (mount policy),
+  notifications; the promotion open may have started a lease break; closing
+  the readable descriptor releases same-process POSIX locks on the file.
+  Regular-file I/O, faults and scheduling can block; `O_NONBLOCK` and
+  cancellation do not bound elapsed time.
+- The permit's one-outstanding rule is per thread; it bounds one operation
+  at a time on that thread, not process-wide composition.
+
+### Native evidence (ABF28)
+
+Run natively on the admitted ext4 fixture: stable empty, short, page-sized,
+multi-page, 65535/65536/65537 and larger files (exact `pread64`/`fstat`
+counts, kernel identity), capture limit versus EOF, budget stops, genuine
+short reads (harness-reduced counts), read-only/`O_NONBLOCK`/`FD_CLOEXEC`
+descriptors and unchanged file offset, same-allocation release, root drop
+and move-out, decoy replacement by a regular file/symlink/FIFO, links and
+unlinks before entry and during the observation, growth, truncation,
+same-size rewrite examination, an idle writer, cancellation at every phase,
+scheduled panics, real descriptor closure in a child process and finite
+supervised concurrent writers (60 s supervisor each). Injected: `EINTR`
+limits, terminal `EAGAIN`, impossible counts, fatal reads with failing
+samples, sample errno/mismatch, allocation refusal and failed release after
+successful reads. Foreign mounts, permission denial, leases and other
+kernels or configurations were not run.
+
 ### Native evidence (ABF18)
 
 Run natively on the admitted ext4 fixture: root and subdirectory pins,
@@ -555,7 +743,8 @@ a separate-process writer); they inherit the same variables:
 
 - `ABF_SECURE_FS_FIXTURE_DIR`: an existing, test-owned directory on the
   same ext-family mount as `/`. Each test creates and removes its own
-  `<dir>/<test>-<pid>/` case directory there.
+  `<dir>/<test>-<pid>/` case directory there. The ABF28 research read tests
+  (`tests/read_linux.rs`, two-key builds only) use `abf28-<test>-<pid>`.
 - `ABF_SECURE_FS_FOREIGN_MOUNT_DIR`: an existing directory on a
   **different** mount (for example tmpfs). It is only resolved, never
   written, to check the `RESOLVE_NO_XDEV` refusal. Without it, skip
@@ -577,10 +766,14 @@ flag/offset probes of a promoted file, M2A.2b `getdents64` answers (a
 bounded plan of at most 128 entries, each batch at most one buffer: forged
 directory data), an allocation-refusal flag, the kernel flags of the last
 directory read handle, a descriptor high-water mark and a listing ledger
-probe, and the crate's **only** byte-reading
-entry point, `ReadableRegularFile::harness_read_at` (at most 4096 bytes per
-call, checked offset and length, fixed staging buffer, both handles checked
-before and after, bytes returned only after the post-checks). The overrides
+probe, the older byte-reading helper
+`ReadableRegularFile::harness_read_at` (at most 4096 bytes per call, checked
+offset and length, fixed staging buffer, both handles checked before and
+after, bytes returned only after the post-checks; it is not the ABF28
+transaction and is unchanged), and the ABF28 research read coordinator and
+instrumentation: permit minting, `pread64`/`fstat` plans (bounded to 128 and
+256 entries), a stage-refusal flag, a stage ledger (counts and the numeric
+address of the last stage) and read event hooks. The overrides
 **forge kernel evidence**: they can make a refused root, a replaced root
 binding, a different object or a non-procfs anchor look admitted. It cannot
 change open flags or resolve masks.
@@ -601,7 +794,7 @@ tests.
 
 ## Not implemented (later gates, separately authorized)
 
-A production read API, bounded reading and content coherence, recursive or
+A production or default-build read API, content coherence, recursive or
 multi-directory scanning (and any aggregate budget across listings), the
 Windows backend, M1 integration, parsers, persistence and UI. Readable
 promotion (M2A.2a) and directory enumeration (M2A.2b) are experimental

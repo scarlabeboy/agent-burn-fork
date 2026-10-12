@@ -222,3 +222,99 @@ impl From<AccessError> for EnumerationError {
         Self::Access(error)
     }
 }
+
+/// ABF28: coded refusal of the research read transaction
+/// (`ReadableRegularFile::research_read_prefix`). Present **only** in the
+/// deliberate two-key research build (feature `fault-injection` **and**
+/// `--cfg abf_secure_fs_harness`) on the supported target.
+///
+/// Every refusal has consumed the readable capability and the permit,
+/// closed both held descriptors and disposed the whole private stage: **no
+/// byte** of the file is returned, not even a prefix read before the
+/// refusal. Like the other errors, no variant carries a name, path, OS
+/// message, content or caller text. A refusal never means "empty" or "zero
+/// usage".
+#[cfg(all(
+    feature = "fault-injection",
+    abf_secure_fs_harness,
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    not(target_abi = "x32"),
+    not(abf_secure_fs_force_unsupported)
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ResearchReadError {
+    /// A budget value is zero or above its hard ceiling, or an internal
+    /// accounting bound would be exceeded. Nothing was sampled or read.
+    InvalidBudget,
+    /// Cancellation was observed (at entry, before an attempt, after an
+    /// attempt or before release). Earlier progress is discarded.
+    Cancelled,
+    /// The single fixed stage could not be allocated. No read happened.
+    AllocationRefused,
+    /// `pread64` or `fstat` returned a value outside the documented kernel
+    /// contract (negative other than `-1`, `-1` without errno, a count above
+    /// the request). Never clamped.
+    KernelContractViolation,
+    /// A fatal `pread64` errno (classified as for opens; `EIO` is
+    /// `UnexpectedOs(5)`). It wins over failing post-attempt samples.
+    ReadFailed(AccessError),
+    /// `pread64` failed with `EAGAIN`/`EWOULDBLOCK`. Terminal: never
+    /// retried, waited for or reopened.
+    WouldBlock,
+    /// `EINTR` exceeded the consecutive or total retry grants.
+    RetryExhausted,
+    /// A held-owner sample was refused: `fstat` errno, not a regular file,
+    /// no concrete identity, a different identity, zero or several links.
+    Metadata(AccessError),
+    /// A sample carried an impossible size or timestamp.
+    InvalidMetadata,
+    /// The size/mtime/ctime change detector differed between the owners or
+    /// from the entry baseline, the read progressed beyond the baseline
+    /// size, or end of file was observed before it.
+    ContentChanged,
+}
+
+#[cfg(all(
+    feature = "fault-injection",
+    abf_secure_fs_harness,
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    not(target_abi = "x32"),
+    not(abf_secure_fs_force_unsupported)
+))]
+impl fmt::Display for ResearchReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBudget => f.write_str("research read: invalid budget"),
+            Self::Cancelled => f.write_str("research read: cancelled"),
+            Self::AllocationRefused => f.write_str("research read: stage allocation refused"),
+            Self::KernelContractViolation => {
+                f.write_str("research read: kernel contract violation")
+            }
+            Self::ReadFailed(error) => write!(f, "research read: read failed ({error})"),
+            Self::WouldBlock => f.write_str("research read: would block"),
+            Self::RetryExhausted => f.write_str("research read: retry exhausted"),
+            Self::Metadata(error) => write!(f, "research read: metadata refused ({error})"),
+            Self::InvalidMetadata => f.write_str("research read: invalid metadata"),
+            Self::ContentChanged => f.write_str("research read: content changed"),
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "fault-injection",
+    abf_secure_fs_harness,
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    not(target_abi = "x32"),
+    not(abf_secure_fs_force_unsupported)
+))]
+impl std::error::Error for ResearchReadError {}

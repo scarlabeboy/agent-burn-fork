@@ -25,7 +25,9 @@
 //! offsets. The unsafe operations are: the `openat2` system call, the
 //! transfer of its returned descriptor into an `OwnedFd`, `fstatfs`, the
 //! direct `readlinkat` system call (M2A.2a), the direct `getdents64` system
-//! call (M2A.2b) and, in the test harness only, `fcntl(F_GETFL/F_GETFD)`.
+//! call (M2A.2b) and, in the test harness only, `fcntl(F_GETFL/F_GETFD)`
+//! and (ABF28, module [`research`]) the direct `pread64` and `fstat` system
+//! calls, the fixed staging allocation and its zeroing on drop.
 //!
 //! Ownership invariant: a raw descriptor returned by the kernel is wrapped
 //! into an `OwnedFd` immediately, exactly once, before any other code runs,
@@ -1592,6 +1594,358 @@ impl ReadableFd {
     }
 }
 
+/// ABF28 research-only primitives of the bounded synthetic read transaction
+/// (`crate::read`): one direct `pread64`, one direct `fstat` per held owner
+/// and the single fixed staging allocation. Compiled only with the
+/// `fault-injection` feature **and** `--cfg abf_secure_fs_harness`; default
+/// and feature-only builds contain none of it.
+///
+/// ABI (installed headers, hashes in the ABF28 report):
+///
+/// - `__NR_pread64 = 17`, `__NR_fstat = 5`: `asm/unistd_64.h` (not the x32
+///   numbers `__X32_SYSCALL_BIT + 17` / `+ 5`);
+/// - `pread64(unsigned int fd, char *buf, size_t count, loff_t pos)`: on
+///   x86-64 every argument is one full-width register (`syscall(2)`), and
+///   `__kernel_loff_t` is `long long` (64-bit, `asm-generic/posix_types.h`);
+///   the result is a count, `0` at end of file, or `-1` with `errno`
+///   (glibc `syscall()`); a short count is not an error (`pread(2)`);
+/// - kernel `struct stat` for x86-64 (`asm/stat.h`, non-i386 branch): 144
+///   bytes, `__kernel_ulong_t`/`__kernel_long_t` = 64-bit `unsigned
+///   long`/`long`, layout asserted below. `fstat` on an `O_PATH` descriptor
+///   is permitted since Linux 3.6 (`open(2)`).
+///
+/// No libc read loop, no `FileExt`, no `statx` fallback and no userspace
+/// retry exist here: each function performs at most one system call. Every
+/// call is on a descriptor borrowed from its single typed owner for the
+/// whole call.
+#[cfg(all(feature = "fault-injection", abf_secure_fs_harness))]
+pub(crate) mod research {
+    use super::{EINVAL, Fd, ReadableFd, c_int, c_long, fault, syscall};
+    use std::alloc::{Layout, alloc_zeroed};
+    use std::io;
+    use std::mem::{align_of, offset_of, size_of};
+    use std::os::fd::AsRawFd;
+    use std::sync::atomic::{Ordering, compiler_fence};
+
+    /// `__NR_pread64` on x86_64 LP64 (`asm/unistd_64.h:21`).
+    const SYS_PREAD64: c_long = 17;
+    /// `__NR_fstat` on x86_64 LP64 (`asm/unistd_64.h:9`).
+    const SYS_FSTAT: c_long = 5;
+
+    /// Capacity of the single fixed staging allocation.
+    pub(crate) const STAGE_BYTES: usize = 65_536;
+    /// Largest window one `pread64` may be given.
+    pub(crate) const MAX_PREAD_WINDOW: usize = 4096;
+
+    /// `S_IFMT` and the file-type values (`linux/stat.h`, `bits/stat.h`).
+    pub(crate) const S_IFMT: u32 = 0o170_000;
+    pub(crate) const S_IFREG: u32 = 0o100_000;
+    pub(crate) const S_IFDIR: u32 = 0o040_000;
+    pub(crate) const S_IFLNK: u32 = 0o120_000;
+    pub(crate) const S_IFIFO: u32 = 0o010_000;
+    pub(crate) const S_IFSOCK: u32 = 0o140_000;
+    pub(crate) const S_IFCHR: u32 = 0o020_000;
+    pub(crate) const S_IFBLK: u32 = 0o060_000;
+
+    /// Kernel `struct stat` for x86-64 (`asm/stat.h`). Every field is an
+    /// integer, so the all-zero value is valid. Only identity, link count,
+    /// mode, size, mtime and ctime are read; atime is never used.
+    #[repr(C)]
+    struct KernelStat {
+        st_dev: u64,
+        st_ino: u64,
+        st_nlink: u64,
+        st_mode: u32,
+        st_uid: u32,
+        st_gid: u32,
+        pad0: u32,
+        st_rdev: u64,
+        st_size: i64,
+        st_blksize: i64,
+        st_blocks: i64,
+        st_atime: u64,
+        st_atime_nsec: u64,
+        st_mtime: u64,
+        st_mtime_nsec: u64,
+        st_ctime: u64,
+        st_ctime_nsec: u64,
+        unused: [i64; 3],
+    }
+
+    const _: () = {
+        assert!(size_of::<KernelStat>() == 144);
+        assert!(align_of::<KernelStat>() == 8);
+        assert!(offset_of!(KernelStat, st_dev) == 0);
+        assert!(offset_of!(KernelStat, st_ino) == 8);
+        assert!(offset_of!(KernelStat, st_nlink) == 16);
+        assert!(offset_of!(KernelStat, st_mode) == 24);
+        assert!(offset_of!(KernelStat, st_uid) == 28);
+        assert!(offset_of!(KernelStat, st_gid) == 32);
+        assert!(offset_of!(KernelStat, pad0) == 36);
+        assert!(offset_of!(KernelStat, st_rdev) == 40);
+        assert!(offset_of!(KernelStat, st_size) == 48);
+        assert!(offset_of!(KernelStat, st_blksize) == 56);
+        assert!(offset_of!(KernelStat, st_blocks) == 64);
+        assert!(offset_of!(KernelStat, st_atime) == 72);
+        assert!(offset_of!(KernelStat, st_atime_nsec) == 80);
+        assert!(offset_of!(KernelStat, st_mtime) == 88);
+        assert!(offset_of!(KernelStat, st_mtime_nsec) == 96);
+        assert!(offset_of!(KernelStat, st_ctime) == 104);
+        assert!(offset_of!(KernelStat, st_ctime_nsec) == 112);
+        assert!(offset_of!(KernelStat, unused) == 120);
+        assert!(size_of::<*mut KernelStat>() == 8);
+        assert!(size_of::<*mut u8>() == 8);
+        assert!(size_of::<i64>() == size_of::<c_long>());
+    };
+
+    impl KernelStat {
+        const fn zeroed() -> Self {
+            Self {
+                st_dev: 0,
+                st_ino: 0,
+                st_nlink: 0,
+                st_mode: 0,
+                st_uid: 0,
+                st_gid: 0,
+                pad0: 0,
+                st_rdev: 0,
+                st_size: 0,
+                st_blksize: 0,
+                st_blocks: 0,
+                st_atime: 0,
+                st_atime_nsec: 0,
+                st_mtime: 0,
+                st_mtime_nsec: 0,
+                st_ctime: 0,
+                st_ctime_nsec: 0,
+                unused: [0; 3],
+            }
+        }
+    }
+
+    /// The handle facts the reader uses, copied out of one kernel sample.
+    /// Timestamps keep the kernel's raw values (seconds reinterpreted as
+    /// signed); the caller validates them. atime is deliberately absent.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct StatFacts {
+        pub(crate) device: u64,
+        pub(crate) inode: u64,
+        pub(crate) nlink: u64,
+        pub(crate) mode: u32,
+        pub(crate) size: i64,
+        pub(crate) mtime_sec: i64,
+        pub(crate) mtime_nsec: u64,
+        pub(crate) ctime_sec: i64,
+        pub(crate) ctime_nsec: u64,
+    }
+
+    /// Failure of one direct `fstat`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum StatFailure {
+        /// `-1` with this errno.
+        Errno(i32),
+        /// A return other than `0`/`-1`, or `-1` without an errno.
+        Contract,
+    }
+
+    /// One direct `fstat` of the retained original `O_PATH` handle.
+    pub(crate) fn fstat_original(fd: &Fd) -> Result<StatFacts, StatFailure> {
+        fstat_once(fd.raw())
+    }
+
+    /// One direct `fstat` of the readable handle.
+    pub(crate) fn fstat_readable(fd: &ReadableFd) -> Result<StatFacts, StatFailure> {
+        fstat_once(fd.file.as_raw_fd())
+    }
+
+    /// The single raw `fstat` call site. `fd` is borrowed from a live owner
+    /// by the two callers above for the whole call.
+    fn fstat_once(fd: c_int) -> Result<StatFacts, StatFailure> {
+        let injected = fault::before_fstat();
+        if let Some(fault::StatInjection::Errno(errno)) = injected {
+            // Same mapping as the real path: `-1` without a positive errno
+            // is a contract violation.
+            return Err(if errno > 0 {
+                StatFailure::Errno(errno)
+            } else {
+                StatFailure::Contract
+            });
+        }
+
+        let mut buf = KernelStat::zeroed();
+        let buf_ptr: *mut KernelStat = &mut buf;
+        // SAFETY:
+        // - `syscall` is the glibc variadic wrapper declared in the parent
+        //   module; each variadic argument is full register width (c_long,
+        //   pointer).
+        // - `fd` is the descriptor of an owner borrowed by the caller for the
+        //   whole call, so it cannot be closed or reused meanwhile.
+        // - `buf_ptr` points to an exclusively borrowed, initialized
+        //   `KernelStat` whose layout is the x86-64 kernel `struct stat`
+        //   (asserted above); the kernel writes at most that many bytes.
+        let ret: c_long = unsafe { syscall(SYS_FSTAT, c_long::from(fd), buf_ptr) };
+        if ret != 0 {
+            // Read errno immediately; nothing in between can overwrite it.
+            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            return Err(if ret == -1 && errno > 0 {
+                StatFailure::Errno(errno)
+            } else {
+                StatFailure::Contract
+            });
+        }
+        let facts = StatFacts {
+            device: buf.st_dev,
+            inode: buf.st_ino,
+            nlink: buf.st_nlink,
+            mode: buf.st_mode,
+            size: buf.st_size,
+            mtime_sec: buf.st_mtime as i64,
+            mtime_nsec: buf.st_mtime_nsec,
+            ctime_sec: buf.st_ctime as i64,
+            ctime_nsec: buf.st_ctime_nsec,
+        };
+        Ok(match injected {
+            Some(fault::StatInjection::Override(over)) => over.apply(facts),
+            _ => facts,
+        })
+    }
+
+    /// The raw result of one `pread64` attempt, before any validation.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum PreadResult {
+        /// The returned value when it is not `-1` (may be negative or larger
+        /// than the window: the caller classifies it before any slicing).
+        Returned(i64),
+        /// `-1` with this errno (`0` if none was set).
+        Errno(i32),
+    }
+
+    /// One direct `pread64(fd, window, window.len(), offset)`. The window is
+    /// a positive, at most [`MAX_PREAD_WINDOW`]-byte, initialized and
+    /// exclusively borrowed slice of the stage; `offset .. offset + len`
+    /// must fit the signed 64-bit file-offset range. Anything else is
+    /// refused with `EINVAL` before any system call (never reached by the
+    /// transaction, which validates first). Never moves the description's
+    /// offset; no retry.
+    pub(crate) fn pread_window(fd: &ReadableFd, window: &mut [u8], offset: i64) -> PreadResult {
+        let len = window.len();
+        let in_range = (1..=MAX_PREAD_WINDOW).contains(&len)
+            && offset >= 0
+            && i64::try_from(len)
+                .ok()
+                .and_then(|len| offset.checked_add(len))
+                .is_some();
+        if !in_range {
+            return PreadResult::Errno(EINVAL);
+        }
+        let window = match fault::before_pread() {
+            Some(fault::PreadInjection::Errno(errno)) => return PreadResult::Errno(errno),
+            Some(fault::PreadInjection::Return(ret)) => return PreadResult::Returned(ret),
+            // A genuine kernel call with a smaller count: a short read.
+            Some(fault::PreadInjection::Clamp(limit)) => &mut window[..limit.clamp(1, len)],
+            None => window,
+        };
+
+        let buf_ptr: *mut u8 = window.as_mut_ptr();
+        // SAFETY:
+        // - `syscall` is the glibc variadic wrapper declared in the parent
+        //   module; every variadic argument is full register width (c_long,
+        //   pointer, usize, i64 == c_long on LP64).
+        // - `fd.file` is a live descriptor owned by `fd`, which is borrowed for
+        //   the whole call.
+        // - `buf_ptr` points to an exclusively borrowed, initialized slice of
+        //   exactly `window.len()` bytes, and that exact count is passed: the
+        //   kernel writes at most that many bytes into it.
+        // - `offset` is non-negative and `offset + len` fits `loff_t`
+        //   (checked above).
+        let ret: c_long = unsafe {
+            syscall(
+                SYS_PREAD64,
+                c_long::from(fd.file.as_raw_fd()),
+                buf_ptr,
+                window.len(),
+                offset,
+            )
+        };
+        if ret == -1 {
+            // Read errno immediately; nothing in between can overwrite it.
+            return PreadResult::Errno(io::Error::last_os_error().raw_os_error().unwrap_or(0));
+        }
+        PreadResult::Returned(ret)
+    }
+
+    /// The single fixed staging allocation: exactly [`STAGE_BYTES`]
+    /// zero-initialized bytes from the global allocator, owned by a `Box`
+    /// (so it is freed exactly once, on every path including unwinding).
+    /// No resize, reallocation or copy exists. `Debug` is opaque. On drop
+    /// the bytes are overwritten with zeros (bounded, best effort; not a
+    /// secure-erasure guarantee) before the memory is returned.
+    pub(crate) struct ReadStage {
+        buf: Box<[u8; STAGE_BYTES]>,
+    }
+
+    impl std::fmt::Debug for ReadStage {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("ReadStage(..)")
+        }
+    }
+
+    /// Exactly the layout `Box<[u8; STAGE_BYTES]>` frees with.
+    const STAGE_LAYOUT: Layout = Layout::new::<[u8; STAGE_BYTES]>();
+
+    const _: () = {
+        assert!(STAGE_LAYOUT.size() == STAGE_BYTES);
+        assert!(STAGE_LAYOUT.align() == 1);
+        assert!(STAGE_BYTES > 0);
+    };
+
+    impl ReadStage {
+        /// One fallible allocation. `None` when the allocator refuses (or
+        /// the harness models a refusal); nothing else is allocated.
+        pub(crate) fn allocate() -> Option<Self> {
+            if fault::take_refuse_read_stage() {
+                return None;
+            }
+            // SAFETY: `STAGE_LAYOUT` has a non-zero size (asserted above).
+            let raw: *mut u8 = unsafe { alloc_zeroed(STAGE_LAYOUT) };
+            if raw.is_null() {
+                return None;
+            }
+            // SAFETY: `raw` is non-null, was just returned by the global
+            // allocator for exactly `Layout::new::<[u8; STAGE_BYTES]>()`
+            // (the layout `Box` uses to free it), and is zero-initialized,
+            // which is a valid `[u8; STAGE_BYTES]`. Nothing else owns it;
+            // ownership moves into the `Box` exactly once, here.
+            let buf = unsafe { Box::from_raw(raw.cast::<[u8; STAGE_BYTES]>()) };
+            fault::note_read_stage(buf.as_ptr() as usize);
+            Some(Self { buf })
+        }
+
+        pub(crate) fn bytes(&self) -> &[u8; STAGE_BYTES] {
+            &self.buf
+        }
+
+        pub(crate) fn bytes_mut(&mut self) -> &mut [u8; STAGE_BYTES] {
+            &mut self.buf
+        }
+    }
+
+    impl Drop for ReadStage {
+        fn drop(&mut self) {
+            for byte in self.buf.iter_mut() {
+                let ptr: *mut u8 = byte;
+                // SAFETY: `ptr` comes from an exclusive reference to one
+                // initialized byte of the owned buffer; a volatile store of a
+                // `u8` there is in bounds and aligned.
+                unsafe { ptr.write_volatile(0) };
+            }
+            compiler_fence(Ordering::SeqCst);
+            fault::note_read_stage_disposed(self.buf.iter().all(|&byte| byte == 0));
+            // `self.buf` is freed right after this body runs.
+        }
+    }
+}
+
 /// Test-only harness instrumentation. It is compiled only with the
 /// `fault-injection` feature **and** `--cfg abf_secure_fs_harness` (a build
 /// with only the feature fails to compile), and is thread-local, so parallel
@@ -1649,6 +2003,214 @@ pub(crate) mod fault {
         static REFUSE_ALLOCATION: Cell<bool> = const { Cell::new(false) };
         static DIRECTORY_READ_STATUS: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
         static PEAK: Cell<u64> = const { Cell::new(0) };
+        static PREAD_PLAN: RefCell<VecDeque<Option<PreadInjection>>> = const { RefCell::new(VecDeque::new()) };
+        static PREAD_CALLS: Cell<u64> = const { Cell::new(0) };
+        static STAT_PLAN: RefCell<VecDeque<Option<StatInjection>>> = const { RefCell::new(VecDeque::new()) };
+        static STAT_CALLS: Cell<u64> = const { Cell::new(0) };
+        static REFUSE_READ_STAGE: Cell<bool> = const { Cell::new(false) };
+        static READ_STAGE_ADDRESS: Cell<usize> = const { Cell::new(0) };
+        static READ_STAGE_ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+        static READ_STAGE_DISPOSALS: Cell<u64> = const { Cell::new(0) };
+        static READ_STAGE_ZEROED: Cell<Option<bool>> = const { Cell::new(None) };
+        static READ_EVENT_HOOK: RefCell<Option<ReadEventHook>> = const { RefCell::new(None) };
+    }
+
+    // -- ABF28 bounded synthetic read transaction ----------------------------
+
+    /// Largest accepted `pread64` plan ([`set_pread_plan`]).
+    pub(crate) const MAX_PREAD_PLAN: usize = 128;
+    /// Largest accepted `fstat` plan ([`set_stat_plan`]).
+    pub(crate) const MAX_STAT_PLAN: usize = 256;
+
+    /// A planned replacement for one `pread64` attempt of the research
+    /// read transaction. Harness only: `Errno` and `Return` forge the
+    /// kernel result; `Clamp` makes the genuine call with a smaller count.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum PreadInjection {
+        /// Answer with `-1` and this errno instead of calling the kernel.
+        Errno(i32),
+        /// Answer with this raw return value without writing the buffer
+        /// (models an impossible or forged kernel count).
+        Return(i64),
+        /// Call the kernel with at most this many bytes (at least one):
+        /// a genuine short read of real bytes.
+        Clamp(usize),
+    }
+
+    /// Replaces selected fields of one genuine `fstat` sample (forged
+    /// evidence, harness only). `None` keeps the kernel's value.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct StatOverride {
+        pub device: Option<u64>,
+        pub inode: Option<u64>,
+        pub nlink: Option<u64>,
+        pub mode: Option<u32>,
+        pub size: Option<i64>,
+        pub mtime: Option<(i64, u64)>,
+        pub ctime: Option<(i64, u64)>,
+    }
+
+    impl StatOverride {
+        pub(crate) fn apply(self, facts: super::research::StatFacts) -> super::research::StatFacts {
+            let mut out = facts;
+            if let Some(device) = self.device {
+                out.device = device;
+            }
+            if let Some(inode) = self.inode {
+                out.inode = inode;
+            }
+            if let Some(nlink) = self.nlink {
+                out.nlink = nlink;
+            }
+            if let Some(mode) = self.mode {
+                out.mode = mode;
+            }
+            if let Some(size) = self.size {
+                out.size = size;
+            }
+            if let Some((sec, nsec)) = self.mtime {
+                out.mtime_sec = sec;
+                out.mtime_nsec = nsec;
+            }
+            if let Some((sec, nsec)) = self.ctime {
+                out.ctime_sec = sec;
+                out.ctime_nsec = nsec;
+            }
+            out
+        }
+    }
+
+    /// A planned replacement for one direct `fstat` of the research read
+    /// transaction.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum StatInjection {
+        /// Answer with `-1` and this errno instead of calling the kernel.
+        Errno(i32),
+        /// Make the genuine call, then replace the selected fields.
+        Override(StatOverride),
+    }
+
+    /// Steps of the research read transaction at which a test hook runs
+    /// (counts are 1-based and per transaction).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum ReadEvent {
+        /// Both entry samples taken and admitted, before the stage exists.
+        EntrySampled,
+        /// The stage is allocated, before the first cancellation poll of
+        /// the read loop.
+        StageAllocated,
+        /// Credits charged, right before `pread64` attempt `n`.
+        BeforeAttempt(u32),
+        /// `pread64` attempt `n` returned, before its two post samples.
+        AfterAttempt(u32),
+        /// Direct `fstat` attempt `n` returned.
+        AfterMetadata(u32),
+        /// Final samples passed, right before the final cancellation poll.
+        BeforeFinalCancel,
+        /// Both held descriptors closed, before the result is assembled.
+        OwnersClosed,
+    }
+
+    type ReadEventHook = Box<dyn FnMut(ReadEvent)>;
+
+    /// Counts every transaction `pread64` attempt and answers it from the
+    /// plan, if a planned entry is `Some`.
+    pub(crate) fn before_pread() -> Option<PreadInjection> {
+        PREAD_CALLS.with(|c| c.set(c.get() + 1));
+        PREAD_PLAN.with(|p| p.borrow_mut().pop_front()).flatten()
+    }
+
+    /// Replaces the plan. Panics (harness misuse) above [`MAX_PREAD_PLAN`].
+    pub(crate) fn set_pread_plan(plan: &[Option<PreadInjection>]) {
+        assert!(plan.len() <= MAX_PREAD_PLAN, "pread plan too long");
+        PREAD_PLAN.with(|p| *p.borrow_mut() = plan.iter().copied().collect());
+    }
+
+    pub(crate) fn pread_calls() -> u64 {
+        PREAD_CALLS.with(Cell::get)
+    }
+
+    pub(crate) fn remaining_pread_plan() -> usize {
+        PREAD_PLAN.with(|p| p.borrow().len())
+    }
+
+    /// Counts every transaction `fstat` attempt and returns its planned
+    /// injection, if any.
+    pub(crate) fn before_fstat() -> Option<StatInjection> {
+        STAT_CALLS.with(|c| c.set(c.get() + 1));
+        STAT_PLAN.with(|p| p.borrow_mut().pop_front()).flatten()
+    }
+
+    /// Replaces the plan. Panics (harness misuse) above [`MAX_STAT_PLAN`].
+    pub(crate) fn set_stat_plan(plan: &[Option<StatInjection>]) {
+        assert!(plan.len() <= MAX_STAT_PLAN, "fstat plan too long");
+        STAT_PLAN.with(|p| *p.borrow_mut() = plan.iter().copied().collect());
+    }
+
+    pub(crate) fn stat_calls() -> u64 {
+        STAT_CALLS.with(Cell::get)
+    }
+
+    pub(crate) fn remaining_stat_plan() -> usize {
+        STAT_PLAN.with(|p| p.borrow().len())
+    }
+
+    /// Makes the next stage allocation of a read transaction fail.
+    pub(crate) fn set_refuse_read_stage(refuse: bool) {
+        REFUSE_READ_STAGE.with(|r| r.set(refuse));
+    }
+
+    /// Consumes the stage-refusal flag.
+    pub(crate) fn take_refuse_read_stage() -> bool {
+        REFUSE_READ_STAGE.with(|r| r.replace(false))
+    }
+
+    pub(crate) fn note_read_stage(address: usize) {
+        READ_STAGE_ADDRESS.with(|a| a.set(address));
+        READ_STAGE_ALLOCATIONS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn note_read_stage_disposed(zeroed: bool) {
+        READ_STAGE_DISPOSALS.with(|c| c.set(c.get() + 1));
+        READ_STAGE_ZEROED.with(|z| z.set(Some(zeroed)));
+    }
+
+    /// `(address of the last stage, stages allocated, stages disposed,
+    /// whether the last disposed stage was all zero before it was freed)`.
+    pub(crate) fn read_stage_ledger() -> (usize, u64, u64, Option<bool>) {
+        (
+            READ_STAGE_ADDRESS.with(Cell::get),
+            READ_STAGE_ALLOCATIONS.with(Cell::get),
+            READ_STAGE_DISPOSALS.with(Cell::get),
+            READ_STAGE_ZEROED.with(Cell::get),
+        )
+    }
+
+    pub(crate) fn set_read_event_hook(hook: ReadEventHook) {
+        READ_EVENT_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+    }
+
+    pub(crate) fn clear_read_event_hook() {
+        READ_EVENT_HOOK.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// Runs the hook, if any, synchronously on this thread. It is taken out
+    /// while it runs (so it may touch the filesystem) and restored after;
+    /// a hook that panics is not restored.
+    pub(crate) fn read_event(event: ReadEvent) {
+        let taken = READ_EVENT_HOOK.with(|h| h.borrow_mut().take());
+        if let Some(mut hook) = taken {
+            hook(event);
+            READ_EVENT_HOOK.with(|h| {
+                let mut slot = h.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(hook);
+                }
+            });
+        }
     }
 
     /// Counts every getdents64 attempt and answers it from the plan, if a
@@ -1829,5 +2391,15 @@ pub(crate) mod fault {
         set_refuse_allocation(false);
         note_directory_read_status(None);
         PEAK.with(|p| p.set(0));
+        set_pread_plan(&[]);
+        PREAD_CALLS.with(|c| c.set(0));
+        set_stat_plan(&[]);
+        STAT_CALLS.with(|c| c.set(0));
+        set_refuse_read_stage(false);
+        READ_STAGE_ADDRESS.with(|a| a.set(0));
+        READ_STAGE_ALLOCATIONS.with(|c| c.set(0));
+        READ_STAGE_DISPOSALS.with(|c| c.set(0));
+        READ_STAGE_ZEROED.with(|z| z.set(None));
+        clear_read_event_hook();
     }
 }
