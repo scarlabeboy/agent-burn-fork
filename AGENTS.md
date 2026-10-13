@@ -1,6 +1,6 @@
 # Agent Burn Fork (ABF) — Instructions for coding agents
 
-**Status:** project bootstrap rules. Read this file before any operation. It grants **no permission by itself** to inspect sensitive data, execute tests, modify code, or mutate Git. The current gate prompt defines the exact allowed scope.
+**Status:** standing repository instructions for coding agents. Read this file before any operation. It grants **no permission by itself** to inspect sensitive data, execute tests, modify code, or mutate Git. The current gate prompt defines the exact allowed scope.
 
 ## Project intent
 
@@ -70,6 +70,9 @@ The user stages selected files **manually, through VS Code or reviewed shell com
 - Run **only** gate-authorized tests, builds and commands; consider their output directories and cache side effects. Never claim PASS for unexecuted tests.
 - Prefer independent expected outcomes, adversarial cases (copied sessions, token collisions, offline sources, concurrent writes, interrupted persistence) and negative-path tests.
 - Independent auditors work read-only on source by default; write reports and authorized test artifacts outside the project, never fix the audited code.
+- Environment-dependent tests are representative only if their execution environment has been verified for the property under test. A sandbox result does not automatically prove native Windows/WSL filesystem, permissions, mount, or kernel behavior. Report unavailable or nonrepresentative tests; never bypass isolation.
+- Required validations follow the gate's risks and affected invariants. Investigate failures, contradictions, and new risks, but avoid repeating equivalent checks without new evidentiary value. Never sacrifice required validation for time or tokens.
+- Use deterministic checks for repository identity, file inventories, hashes, command results, and test counts. Reuse verified unchanged evidence when applicable, while independently examining affected code and invariants.
 
 ## Conversation, reports and completion
 
@@ -77,8 +80,8 @@ The user stages selected files **manually, through VS Code or reviewed shell com
 - **Resume** retains its integer and adds `B`, `C`, `D`...: `ABF1B` = first resume of `ABF1`. New independent audit = new integer.
 - Gates (`A0`, `A1`, `A2`, `B1`, ...) are **separate** from conversation IDs.
 - Standard non-persistent reports belong in an authorized, isolated temporary directory such as `/tmp/abf1-a0-audit/` **in the running environment**. Do not assume Windows and WSL share `/tmp`.
-- Report: gate/conversation, baseline, inspect/edit list, exact commands and exit codes, tests PASS/FAIL/SKIP, findings, protected-state checks, artifacts and SHA256, risks, and **one** recommended next action (not started).
+- Reporting is proportional to the gate. Preserve: verified baseline, inspected/edited paths, material commands and exit codes, actual tests versus `NOT_RUN`, findings, relevant protected-state checks, evidence references, limitations, and exactly **one** proposed next action (not started). Avoid duplicating unchanged logs and creating unnecessary reports.
 - Finding severities: `BLOCKER`, `MAJOR`, `MINOR`. Audit verdict: `PASS`, `PASS_WITH_FINDINGS`, `HOLD`. Use `FINDINGS` only when a particular audit contract explicitly defines that legacy label. A PASS applies only to the checked scope.
-- Corrections normally return to the original author thread; an independent audit remains immutable and is repeated as warranted.
+- The orchestrator chooses NEW or RESUME for corrections from technical continuity, remaining context, known compactions, previous resumptions, risk, and evidence. Independent audits remain separate from author corrections, immutable, and are repeated as warranted.
 
-**Current implementation status:** ABF governance and the synthetic M1 collection boundary are committed (`81745ac`). M1 is a research foundation only; production reuse is **BLOCKED** pending independently reviewed containment, memory, Windows and other safety work. No future implementation gate is implicitly authorized.
+**Implementation status:** never infer current HEAD, completed gates, accepted findings, or production readiness from this file. Verify current repository state and the applicable approved contracts. Synthetic research does not authorize production collection, real-history access, or production reuse; these remain **BLOCKED** without separate authorization and required security review. No future gate is implicitly authorized.
