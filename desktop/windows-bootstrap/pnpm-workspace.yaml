@@ -1,0 +1,11 @@
+packages:
+  - '.'
+ignoreScripts: true
+strictDepBuilds: true
+blockExoticSubdeps: true
+trustPolicy: no-downgrade
+minimumReleaseAge: 2880
+managePackageManagerVersions: false
+autoInstallPeers: false
+strictPeerDependencies: true
+registry: https://registry.npmjs.org/

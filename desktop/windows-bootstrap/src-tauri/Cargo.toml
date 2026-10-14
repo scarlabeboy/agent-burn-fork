@@ -1,0 +1,18 @@
+[package]
+name = "abf-win-host-bootstrap"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[workspace]
+
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = "=2.12.3"
+
+[build-dependencies]
+tauri-build = "=2.7.2"

@@ -1,0 +1,23 @@
+{
+  "name": "@abf/windows-bootstrap",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.1.1",
+  "devDependencies": {
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "vite": "8.1.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "typescript": "5.9.3",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@types/node": "24.10.1",
+    "tsx": "4.21.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "node --import tsx --test --test-isolation=none tests/App.test.tsx",
+    "build": "pnpm run typecheck && vite build --config vite.config.ts"
+  }
+}
