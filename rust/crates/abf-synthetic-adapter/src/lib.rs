@@ -19,23 +19,34 @@
 //! ```compile_fail
 //! use abf_synthetic_adapter::*;
 //! let r = run_synthetic_fixture(SyntheticCase::DenyAllDefault);
-//! let capability = r.grant;
+//! abf_synthetic_model::simulate(abf_synthetic_model::Limits { caps: [20; 12] }, |mut model| {
+//!     model.retire(r);
+//! });
 //! ```
 //! There is no arbitrary View converter or historical-to-current conversion.
 //! ```compile_fail
 //! use abf_synthetic_adapter::*;
 //! fn bypass(v: abf_synthetic_model::View) -> FreshReceiverReadout {
-//!     FreshReceiverReadout::from_view(v)
+//!     v.into()
 //! }
 //! ```
 //! ```compile_fail
 //! use abf_synthetic_adapter::*;
 //! fn reuse(h: HistoricalInspection) -> FreshReceiverReadout { h.into() }
 //! ```
-//! No filesystem, process, network, credential or UI operation is exposed.
+//! Descriptive readouts cannot be supplied as fixture inputs. These examples
+//! prove only the illustrated type restrictions, not native security guarantees.
+//! Public DTOs can be freely forged and are never credentials.
+//! ```
+//! use abf_synthetic_adapter::*;
+//! let mut r = run_synthetic_fixture(SyntheticCase::DenyAllDefault);
+//! r.contract_version = 999; // legitimate descriptive-data mutation
+//! let _: SyntheticReadout = r;
+//! ```
 //! ```compile_fail
 //! use abf_synthetic_adapter::*;
-//! run_synthetic_fixture(SyntheticCase::DenyAllDefault).collect("/native/history");
+//! let r = run_synthetic_fixture(SyntheticCase::DenyAllDefault);
+//! run_synthetic_fixture(r);
 //! ```
 extern crate alloc;
 use abf_synthetic_model as m;
@@ -167,16 +178,31 @@ pub struct HistoricalInspection {
 /// Successful use at this sequence point; never reusable authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreshReceiverReadout {
+    pub subject: Subject,
+    pub phase: Phase,
     pub receiver: u32,
     pub data: QualifiedData,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReceiverUse {
     Authorized(FreshReceiverReadout),
-    Refused { receiver: u32, reason: Reason },
+    Refused {
+        subject: Subject,
+        phase: Phase,
+        receiver: u32,
+        reason: Reason,
+    },
+}
+/// Descriptive projection subject, never a collection source or permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Subject {
+    Environment(FixtureEnvironment),
+    Computer,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
+    Outstanding,
+    Exhausted,
     Qualified,
     Revoked,
     Downgraded,
@@ -188,6 +214,7 @@ pub enum Phase {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoricalReadout {
+    pub subject: Subject,
     pub phase: Phase,
     pub inspection: Result<HistoricalInspection, Reason>,
 }
@@ -340,22 +367,67 @@ fn snapshot(r: &mut SyntheticReadout, model: &m::Model<'_>, phase: Phase) {
     });
 }
 /// Private handle-keyed association; handles cannot leave simulate.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Capture<'id> {
     observation: m::Observation<'id>,
     object: u32,
     capture: u32,
+    acceptance_ordinal: usize,
+    lineage: m::Lineage,
+    range: m::Range,
+    time: u64,
 }
-fn qualified(view: m::View, captures: &[Capture<'_>]) -> QualifiedData {
-    let mut unique = Vec::<Capture<'_>>::new();
+/// Retains the exact handles submitted to derive/computer, independently of
+/// presentation sidecars. Closed capture() is the sole successful accept path.
+struct Projection<'id> {
+    handle: m::Derived<'id>,
+    captures: Vec<Capture<'id>>,
+    subject: Subject,
+}
+fn canonical<'id>(captures: &[Capture<'id>]) -> Vec<Capture<'id>> {
+    let mut unique: Vec<Capture<'_>> = Vec::new();
     for c in captures {
-        if !unique.iter().any(|x| x.observation == c.observation) {
+        if let Some(prior) = unique.iter().find(|x| x.observation == c.observation) {
+            assert_eq!(prior, c, "conflicting handle binding");
+        } else {
             unique.push(c.clone());
         }
     }
-    assert_eq!(view.observations, unique.len());
-    assert_eq!(view.ranges.len(), unique.len());
-    // Fixed wiring supplies captures in M3A observation creation order.
+    unique.sort_unstable_by_key(|c| c.acceptance_ordinal);
+    assert!(
+        unique
+            .windows(2)
+            .all(|w| w[0].acceptance_ordinal < w[1].acceptance_ordinal),
+        "ambiguous acceptance order"
+    );
+    unique
+}
+fn qualified<'id>(
+    view: m::View,
+    projection: &Projection<'id>,
+    captures: &[Capture<'id>],
+) -> QualifiedData {
+    let unique = canonical(captures);
+    assert_eq!(
+        unique, projection.captures,
+        "sidecars do not match contributing handles"
+    );
+    assert_eq!(view.observations, unique.len(), "observation count");
+    assert_eq!(view.ranges.len(), unique.len(), "range count");
+    for ((env, range, time), c) in view.ranges.iter().zip(&unique) {
+        assert_eq!(
+            (*env, *range, *time),
+            (c.lineage.environment, c.range, c.time),
+            "capture tuple mismatch"
+        );
+    }
+    let mut environments: Vec<_> = unique.iter().map(|c| c.lineage.environment).collect();
+    environments.sort_unstable();
+    environments.dedup();
+    assert_eq!(view.environments, environments, "environment set mismatch");
+    // M3A accept appends a fresh observation; derive/computer sort its indices.
+    // Acceptance ordinals are recorded with the returned handle, never inferred
+    // from payload, label, range or time. Projection retains the contributor set.
     let q = view.qualification;
     QualifiedData {
         origin: Origin::SyntheticOnly,
@@ -380,9 +452,9 @@ fn qualified(view: m::View, captures: &[Capture<'_>]) -> QualifiedData {
                 fixture_object: c.object,
                 fixture_capture: c.capture,
                 environment: environment(env),
-                principal: 7,
-                harness: 3,
-                directory: 9,
+                principal: c.lineage.principal,
+                harness: c.lineage.harness,
+                directory: c.lineage.directory,
                 range: SampleRange {
                     start: range.start,
                     length: range.length,
@@ -396,31 +468,40 @@ fn qualified(view: m::View, captures: &[Capture<'_>]) -> QualifiedData {
 fn inspect<'id>(
     r: &mut SyntheticReadout,
     model: &m::Model<'id>,
-    d: m::Derived<'id>,
+    d: &Projection<'id>,
     captures: &[Capture<'id>],
     phase: Phase,
 ) {
-    let inspection = record(r, OperationCode::View, model.view(d))
+    let inspection = record(r, OperationCode::View, model.view(d.handle))
         .map(|v| HistoricalInspection {
-            data: qualified(v, captures),
+            data: qualified(v, d, captures),
         })
         .map_err(reason);
-    r.historical.push(HistoricalReadout { phase, inspection });
+    r.historical.push(HistoricalReadout {
+        subject: d.subject,
+        phase,
+        inspection,
+    });
 }
 fn receiver_use<'id>(
     r: &mut SyntheticReadout,
     model: &mut m::Model<'id>,
-    d: m::Derived<'id>,
+    d: &Projection<'id>,
     captures: &[Capture<'id>],
     receiver: u32,
+    phase: Phase,
 ) {
     // Convert immediately after successful P, with no intervening model transition.
-    let output = match model.use_result(d, receiver) {
+    let output = match model.use_result(d.handle, receiver) {
         Ok(v) => ReceiverUse::Authorized(FreshReceiverReadout {
+            subject: d.subject,
+            phase,
             receiver,
-            data: qualified(v, captures),
+            data: qualified(v, d, captures),
         }),
         Err(e) => ReceiverUse::Refused {
+            subject: d.subject,
+            phase,
             receiver,
             reason: reason(e),
         },
@@ -434,11 +515,17 @@ fn receiver_use<'id>(
     });
     r.receiver_uses.push(output);
 }
+#[derive(Clone, Copy)]
+struct FixtureObject<'id> {
+    handle: m::Object<'id>,
+    id: u32,
+    lineage: m::Lineage,
+}
 fn setup<'id>(
     r: &mut SyntheticReadout,
     model: &mut m::Model<'id>,
     env: u32,
-) -> (m::Object<'id>, m::Grant<'id>) {
+) -> (FixtureObject<'id>, m::Grant<'id>) {
     let o = record(
         r,
         OperationCode::FixtureObject,
@@ -458,18 +545,31 @@ fn setup<'id>(
     )
     .unwrap();
     let g = record(r, OperationCode::Admit, model.admit(p, false)).unwrap();
-    (o, g)
+    (
+        FixtureObject {
+            handle: o,
+            id: env,
+            lineage: lineage(env),
+        },
+        g,
+    )
 }
 fn capture<'id>(
     r: &mut SyntheticReadout,
     model: &mut m::Model<'id>,
-    o: m::Object<'id>,
+    o: FixtureObject<'id>,
     g: m::Grant<'id>,
     ids: (u32, u32),
     wrong: bool,
 ) -> Capture<'id> {
-    let op = record(r, OperationCode::Begin, model.begin(g, o, RANGE, 10)).unwrap();
-    record(r, OperationCode::ReturnRead, model.return_read(op, o, 42)).unwrap();
+    assert_eq!(o.id, ids.0, "fixture object binding");
+    let op = record(r, OperationCode::Begin, model.begin(g, o.handle, RANGE, 10)).unwrap();
+    record(
+        r,
+        OperationCode::ReturnRead,
+        model.return_read(op, o.handle, 42),
+    )
+    .unwrap();
     if wrong {
         let _ = record(r, OperationCode::Release, model.release(op, 99));
     }
@@ -478,7 +578,19 @@ fn capture<'id>(
         let _ = record(r, OperationCode::Accept, model.accept(released, 99));
     }
     let observation = record(r, OperationCode::Accept, model.accept(released, 11)).unwrap();
+    // Count only successful accepts, including this one; failed accepts never
+    // append an observation. All accepts in this closed adapter pass here.
+    let acceptance_ordinal = r
+        .operations
+        .iter()
+        .filter(|o| o.operation == OperationCode::Accept && o.outcome == Outcome::Succeeded)
+        .count()
+        - 1;
     Capture {
+        acceptance_ordinal,
+        lineage: o.lineage,
+        range: RANGE,
+        time: 0,
         observation,
         object: ids.0,
         capture: ids.1,
@@ -488,9 +600,38 @@ fn derive<'id>(
     r: &mut SyntheticReadout,
     model: &mut m::Model<'id>,
     captures: &[Capture<'id>],
-) -> m::Derived<'id> {
+) -> Projection<'id> {
     let obs: Vec<_> = captures.iter().map(|c| c.observation).collect();
-    record(r, OperationCode::Derive, model.derive(&obs)).unwrap()
+    let handle = record(r, OperationCode::Derive, model.derive(&obs)).unwrap();
+    let captures = canonical(captures);
+    assert!(
+        captures
+            .iter()
+            .all(|c| c.lineage.environment == captures[0].lineage.environment),
+        "closed environment projection"
+    );
+    Projection {
+        handle,
+        subject: Subject::Environment(environment(captures[0].lineage.environment)),
+        captures,
+    }
+}
+fn computer<'id>(
+    r: &mut SyntheticReadout,
+    model: &mut m::Model<'id>,
+    inputs: &[&Projection<'id>],
+) -> Projection<'id> {
+    let handles: Vec<_> = inputs.iter().map(|d| d.handle).collect();
+    let handle = record(r, OperationCode::Computer, model.computer(&handles)).unwrap();
+    let captures: Vec<_> = inputs
+        .iter()
+        .flat_map(|d| d.captures.iter().cloned())
+        .collect();
+    Projection {
+        handle,
+        captures: canonical(&captures),
+        subject: Subject::Computer,
+    }
 }
 /// Every invocation constructs a fresh synchronous model universe with fixed facts.
 /// Nothing returned can be supplied back to this API.
@@ -564,34 +705,34 @@ fn projection_case<'id>(r: &mut SyntheticReadout, model: &mut m::Model<'id>, cas
             let (o2, g2) = setup(r, model, 2);
             let b = capture(r, model, o2, g2, (2, 2), false);
             let db = derive(r, model, core::slice::from_ref(&b));
-            let d = record(r, OperationCode::Computer, model.computer(&[da, db])).unwrap();
+            let d = computer(r, model, &[&da, &db]);
             (d, alloc::vec![a.clone(), b])
         }
         SyntheticCase::RepeatedHandleAndEqualCapture => {
             let b = capture(r, model, o, g, (1, 2), false);
             let db = derive(r, model, &[a.clone(), a.clone(), b.clone()]);
-            let d = record(r, OperationCode::Computer, model.computer(&[da, da, db])).unwrap();
+            let d = computer(r, model, &[&da, &da, &db]);
             (d, alloc::vec![a.clone(), b])
         }
         _ => {
-            let d = record(r, OperationCode::Computer, model.computer(&[da])).unwrap();
+            let d = computer(r, model, &[&da]);
             (d, alloc::vec![a.clone()])
         }
     };
-    inspect(r, model, d, &captures, Phase::Qualified);
+    inspect(r, model, &d, &captures, Phase::Qualified);
     if case == SyntheticCase::ReceiverAndRevocation {
         snapshot(r, model, Phase::Qualified);
-        receiver_use(r, model, d, &captures, 99);
+        receiver_use(r, model, &d, &captures, 99, Phase::Qualified);
         snapshot(r, model, Phase::Qualified);
     }
-    receiver_use(r, model, d, &captures, 11);
+    receiver_use(r, model, &d, &captures, 11, Phase::Qualified);
     match case {
         SyntheticCase::ReceiverAndRevocation => {
             record(r, OperationCode::Retire, model.retire(g)).unwrap();
             let _ = record(r, OperationCode::Derive, model.derive(&[a.observation]));
-            let _ = record(r, OperationCode::Computer, model.computer(&[da]));
-            receiver_use(r, model, d, &captures, 11);
-            inspect(r, model, d, &captures, Phase::Revoked);
+            let _ = record(r, OperationCode::Computer, model.computer(&[da.handle]));
+            receiver_use(r, model, &d, &captures, 11, Phase::Revoked);
+            inspect(r, model, &d, &captures, Phase::Revoked);
         }
         SyntheticCase::DowngradeAndLineageLoss => {
             record(
@@ -600,13 +741,13 @@ fn projection_case<'id>(r: &mut SyntheticReadout, model: &mut m::Model<'id>, cas
                 model.downgrade(a.observation, true, true),
             )
             .unwrap();
-            inspect(r, model, da, &captures, Phase::Downgraded);
-            inspect(r, model, d, &captures, Phase::Downgraded);
-            receiver_use(r, model, d, &captures, 11);
-            record(r, OperationCode::LoseLineage, model.lose_lineage(da)).unwrap();
-            inspect(r, model, d, &captures, Phase::LineageLost);
-            receiver_use(r, model, d, &captures, 11);
-            let _ = record(r, OperationCode::Computer, model.computer(&[d]));
+            inspect(r, model, &da, &captures, Phase::Downgraded);
+            inspect(r, model, &d, &captures, Phase::Downgraded);
+            receiver_use(r, model, &d, &captures, 11, Phase::Downgraded);
+            record(r, OperationCode::LoseLineage, model.lose_lineage(da.handle)).unwrap();
+            inspect(r, model, &d, &captures, Phase::LineageLost);
+            receiver_use(r, model, &d, &captures, 11, Phase::LineageLost);
+            let _ = record(r, OperationCode::Computer, model.computer(&[d.handle]));
         }
         _ => {}
     }
@@ -614,15 +755,15 @@ fn projection_case<'id>(r: &mut SyntheticReadout, model: &mut m::Model<'id>, cas
 fn outstanding<'id>(
     r: &mut SyntheticReadout,
     model: &mut m::Model<'id>,
-    o: m::Object<'id>,
+    o: FixtureObject<'id>,
     g: m::Grant<'id>,
 ) {
-    let op = record(r, OperationCode::Begin, model.begin(g, o, RANGE, 10)).unwrap();
-    snapshot(r, model, Phase::Qualified);
+    let op = record(r, OperationCode::Begin, model.begin(g, o.handle, RANGE, 10)).unwrap();
+    snapshot(r, model, Phase::Outstanding);
     for _ in 0..3 {
-        let _ = record(r, OperationCode::Begin, model.begin(g, o, RANGE, 10));
+        let _ = record(r, OperationCode::Begin, model.begin(g, o.handle, RANGE, 10));
     }
-    snapshot(r, model, Phase::Qualified);
+    snapshot(r, model, Phase::Exhausted);
     record(r, OperationCode::Step, model.step(10)).unwrap();
     snapshot(r, model, Phase::Deadline);
     model.session_loss();
@@ -637,6 +778,144 @@ fn outstanding<'id>(
         model.restart(m::IndependentEvidence::CompleteDrain, true),
     );
     let _ = record(r, OperationCode::Release, model.release(op, 11));
-    record(r, OperationCode::ReturnRead, model.return_read(op, o, 42)).unwrap();
+    record(
+        r,
+        OperationCode::ReturnRead,
+        model.return_read(op, o.handle, 42),
+    )
+    .unwrap();
     snapshot(r, model, Phase::Returned);
+}
+
+#[cfg(test)]
+mod association_tests {
+    use super::*;
+    #[test]
+    fn reversed_equal_sidecars_preserve_handle_binding() {
+        m::simulate(m::Limits { caps: CAPS }, |mut model| {
+            let mut r = run_synthetic_fixture(SyntheticCase::DenyAllDefault);
+            let (o, g) = setup(&mut r, &mut model, 1);
+            let a = capture(&mut r, &mut model, o, g, (1, 1), false);
+            let b = capture(&mut r, &mut model, o, g, (1, 2), false);
+            let d = derive(&mut r, &mut model, &[a.clone(), a.clone(), b.clone()]);
+            let data = qualified(model.view(d.handle).unwrap(), &d, &[b, a]);
+            assert_eq!(
+                data.captures
+                    .iter()
+                    .map(|c| c.fixture_capture)
+                    .collect::<Vec<_>>(),
+                alloc::vec![1, 2]
+            );
+        });
+    }
+    #[test]
+    fn reversed_two_environment_sidecars_preserve_handle_binding() {
+        m::simulate(m::Limits { caps: CAPS }, |mut model| {
+            let mut r = run_synthetic_fixture(SyntheticCase::DenyAllDefault);
+            let (o, g) = setup(&mut r, &mut model, 1);
+            let a = capture(&mut r, &mut model, o, g, (1, 1), false);
+            let (o2, g2) = setup(&mut r, &mut model, 2);
+            let b = capture(&mut r, &mut model, o2, g2, (2, 2), false);
+            let da = derive(&mut r, &mut model, core::slice::from_ref(&a));
+            let db = derive(&mut r, &mut model, core::slice::from_ref(&b));
+            let d = computer(&mut r, &mut model, &[&db, &da, &da]);
+            let data = qualified(model.view(d.handle).unwrap(), &d, &[b, a]);
+            assert_eq!(
+                data.captures
+                    .iter()
+                    .map(|c| (c.fixture_capture, c.environment.id))
+                    .collect::<Vec<_>>(),
+                alloc::vec![(1, 1), (2, 2)]
+            );
+        });
+    }
+    #[test]
+    fn repeated_presented_handles_collapse() {
+        m::simulate(m::Limits { caps: CAPS }, |mut model| {
+            let mut r = run_synthetic_fixture(SyntheticCase::DenyAllDefault);
+            let (o, g) = setup(&mut r, &mut model, 1);
+            let a = capture(&mut r, &mut model, o, g, (1, 1), false);
+            let b = capture(&mut r, &mut model, o, g, (1, 2), false);
+            let d = derive(&mut r, &mut model, &[b.clone(), a.clone(), a.clone()]);
+            let data = qualified(
+                model.view(d.handle).unwrap(),
+                &d,
+                &[b.clone(), a.clone(), b, a],
+            );
+            assert_eq!(data.observation_count, 2);
+            assert_eq!(
+                data.captures
+                    .iter()
+                    .map(|c| c.fixture_capture)
+                    .collect::<Vec<_>>(),
+                alloc::vec![1, 2]
+            );
+        });
+    }
+    fn mismatch(change: impl FnOnce(&mut Vec<Capture<'_>>, &mut m::View)) {
+        m::simulate(m::Limits { caps: CAPS }, |mut model| {
+            let mut r = run_synthetic_fixture(SyntheticCase::DenyAllDefault);
+            let (o, g) = setup(&mut r, &mut model, 1);
+            let a = capture(&mut r, &mut model, o, g, (1, 1), false);
+            let b = capture(&mut r, &mut model, o, g, (1, 2), false);
+            let d = derive(&mut r, &mut model, core::slice::from_ref(&a));
+            let mut sidecars = alloc::vec![a, b];
+            sidecars.pop();
+            let mut view = model.view(d.handle).unwrap();
+            change(&mut sidecars, &mut view);
+            let _ = qualified(view, &d, &sidecars);
+        });
+    }
+    #[test]
+    #[should_panic(expected = "sidecars do not match contributing handles")]
+    fn missing_mapping_fails_closed() {
+        mismatch(|c, _| c.clear());
+    }
+    #[test]
+    #[should_panic(expected = "sidecars do not match contributing handles")]
+    fn altered_capture_identity_fails_closed() {
+        mismatch(|c, _| c[0].capture = 2);
+    }
+    #[test]
+    #[should_panic(expected = "sidecars do not match contributing handles")]
+    fn altered_ordinal_fails_closed() {
+        mismatch(|c, _| c[0].acceptance_ordinal = 1);
+    }
+    #[test]
+    #[should_panic(expected = "capture tuple mismatch")]
+    fn altered_environment_fails_closed() {
+        mismatch(|_, v| v.ranges[0].0 = 2);
+    }
+    #[test]
+    #[should_panic(expected = "capture tuple mismatch")]
+    fn altered_range_fails_closed() {
+        mismatch(|_, v| v.ranges[0].1.length = 3);
+    }
+    #[test]
+    #[should_panic(expected = "capture tuple mismatch")]
+    fn altered_time_fails_closed() {
+        mismatch(|_, v| v.ranges[0].2 = 1);
+    }
+    #[test]
+    #[should_panic(expected = "observation count")]
+    fn altered_observation_count_fails_closed() {
+        mismatch(|_, v| v.observations = 2);
+    }
+    #[test]
+    #[should_panic(expected = "range count")]
+    fn missing_range_fails_closed() {
+        mismatch(|_, v| v.ranges.clear());
+    }
+    #[test]
+    #[should_panic(expected = "sidecars do not match contributing handles")]
+    fn same_count_noncontributing_handle_fails_closed() {
+        m::simulate(m::Limits { caps: CAPS }, |mut model| {
+            let mut r = run_synthetic_fixture(SyntheticCase::DenyAllDefault);
+            let (o, g) = setup(&mut r, &mut model, 1);
+            let a = capture(&mut r, &mut model, o, g, (1, 1), false);
+            let b = capture(&mut r, &mut model, o, g, (1, 2), false);
+            let d = derive(&mut r, &mut model, &[a]);
+            let _ = qualified(model.view(d.handle).unwrap(), &d, &[b]);
+        });
+    }
 }

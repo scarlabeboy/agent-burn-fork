@@ -126,6 +126,8 @@ fn wrong_receivers_and_retirement_cannot_use_history() {
     assert_eq!(
         r.receiver_uses[0],
         ReceiverUse::Refused {
+            subject: Subject::Computer,
+            phase: Phase::Qualified,
             receiver: 99,
             reason: Reason::Unauthorized
         }
@@ -134,6 +136,8 @@ fn wrong_receivers_and_retirement_cannot_use_history() {
     assert_eq!(
         r.receiver_uses[2],
         ReceiverUse::Refused {
+            subject: Subject::Computer,
+            phase: Phase::Revoked,
             receiver: 11,
             reason: Reason::Retired
         }
@@ -185,6 +189,8 @@ fn downgrade_is_preserved_and_lineage_loss_withholds() {
     assert_eq!(
         r.receiver_uses[2],
         ReceiverUse::Refused {
+            subject: Subject::Computer,
+            phase: Phase::LineageLost,
             receiver: 11,
             reason: Reason::LineageUnknown
         }
@@ -328,5 +334,103 @@ fn fixed_terminal_accounting_table() {
         assert_eq!(s.spent[7], work, "{case:?}");
         assert_eq!(s.held[6], retained, "{case:?}");
         assert_eq!(s.spent[11], registry, "{case:?}");
+    }
+}
+
+#[test]
+fn outstanding_snapshots_are_not_qualified() {
+    let r = run_synthetic_fixture(SyntheticCase::ExhaustionAndOutstandingRead);
+    assert_eq!(format!("{:?}", r.snapshots[0].phase), "Outstanding");
+    assert_eq!(format!("{:?}", r.snapshots[1].phase), "Exhausted");
+}
+
+#[test]
+fn every_entry_has_an_independently_expected_subject_and_phase() {
+    let env = Subject::Environment(FixtureEnvironment {
+        id: 1,
+        label: EnvironmentLabel::SimulatedWindows,
+    });
+    let expected = [
+        (SyntheticCase::DenyAllDefault, vec![], vec![]),
+        (
+            SyntheticCase::TwoEnvironmentQualifiedProjection,
+            vec![(Subject::Computer, Phase::Qualified)],
+            vec![Phase::Qualified],
+        ),
+        (
+            SyntheticCase::RepeatedHandleAndEqualCapture,
+            vec![(Subject::Computer, Phase::Qualified)],
+            vec![Phase::Qualified],
+        ),
+        (
+            SyntheticCase::ReceiverAndRevocation,
+            vec![
+                (Subject::Computer, Phase::Qualified),
+                (Subject::Computer, Phase::Revoked),
+            ],
+            vec![Phase::Qualified, Phase::Qualified, Phase::Revoked],
+        ),
+        (
+            SyntheticCase::DowngradeAndLineageLoss,
+            vec![
+                (Subject::Computer, Phase::Qualified),
+                (env, Phase::Downgraded),
+                (Subject::Computer, Phase::Downgraded),
+                (Subject::Computer, Phase::LineageLost),
+            ],
+            vec![Phase::Qualified, Phase::Downgraded, Phase::LineageLost],
+        ),
+        (SyntheticCase::ExhaustionAndOutstandingRead, vec![], vec![]),
+    ];
+    for (case, historical, phases) in expected {
+        let r = run_synthetic_fixture(case);
+        assert_eq!(
+            r.historical
+                .iter()
+                .map(|h| (h.subject, h.phase))
+                .collect::<Vec<_>>(),
+            historical,
+            "{case:?}"
+        );
+        let entries: Vec<_> = r
+            .receiver_uses
+            .iter()
+            .map(|u| match u {
+                ReceiverUse::Authorized(f) => (f.subject, f.phase),
+                ReceiverUse::Refused { subject, phase, .. } => (*subject, *phase),
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            phases
+                .into_iter()
+                .map(|p| (Subject::Computer, p))
+                .collect::<Vec<_>>(),
+            "{case:?}"
+        );
+    }
+}
+#[test]
+fn every_snapshot_phase_has_an_independent_expected_label() {
+    for case in CASES {
+        let r = run_synthetic_fixture(case);
+        let expected = match case {
+            SyntheticCase::ReceiverAndRevocation => {
+                vec![Phase::Qualified, Phase::Qualified, Phase::Completed]
+            }
+            SyntheticCase::ExhaustionAndOutstandingRead => vec![
+                Phase::Outstanding,
+                Phase::Exhausted,
+                Phase::Deadline,
+                Phase::SessionLoss,
+                Phase::Returned,
+                Phase::Completed,
+            ],
+            _ => vec![Phase::Completed],
+        };
+        assert_eq!(
+            r.snapshots.iter().map(|s| s.phase).collect::<Vec<_>>(),
+            expected
+        );
     }
 }
