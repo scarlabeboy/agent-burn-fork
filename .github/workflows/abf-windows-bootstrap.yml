@@ -1,0 +1,100 @@
+name: ABF Windows Bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: desktop/windows-bootstrap
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/desktop/windows-bootstrap/src-tauri/target
+      RUSTUP_TOOLCHAIN: 1.96.0-x86_64-pc-windows-msvc
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Tool acquisition: official Node distribution, public npm pnpm package,
+      # and official Rust distribution through the runner's installed rustup.
+      # Dependency acquisition: public npm and crates.io, using existing locks.
+      - name: Select Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.19.0'
+          architecture: x64
+
+      - name: Install pnpm without lifecycle scripts
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm install --global pnpm@11.1.1 --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/
+          node --version
+          pnpm --version
+
+      - name: Select Rust MSVC toolchain
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install 1.96.0-x86_64-pc-windows-msvc --profile minimal --target x86_64-pc-windows-msvc
+          rustc --version --verbose
+          cargo --version
+
+      - name: Install locked frontend dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build production frontend
+        run: pnpm run build
+
+      - name: Build unsigned Windows x64 bootstrap
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual Studio C++ tools are unavailable' }
+          $devcmd = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          $devEnvironment = & $env:ComSpec /d /c "call `"$devcmd`" -no_logo -arch=x64 -host_arch=x64 && set"
+          if ($LASTEXITCODE -ne 0) { throw 'Visual Studio environment initialization failed' }
+          foreach ($line in $devEnvironment) {
+            if ($line -match '^([^=]+)=(.*)$') {
+              [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+            }
+          }
+          if (-not $env:VCToolsVersion -or -not $env:WindowsSDKVersion) {
+            throw 'MSVC or Windows SDK identification is missing'
+          }
+          Write-Host "Visual Studio: $vs"
+          Write-Host "MSVC: $env:VCToolsVersion; compiler: $((Get-Command cl.exe).Source)"
+          Write-Host "Windows SDK: $env:WindowsSDKVersion; root: $env:WindowsSdkDir"
+          cargo build --manifest-path src-tauri/Cargo.toml --release --locked --target x86_64-pc-windows-msvc --features custom-protocol --bin abf-win-host-bootstrap
+
+      # Do not execute the binary. It remains untrusted pending later inspection;
+      # native DLL/WebView2 runtime requirements and GUI behavior are unvalidated.
+      - name: Verify executable and write SHA-256
+        run: |
+          $exe = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/abf-win-host-bootstrap.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Expected executable is missing' }
+          if ((Get-Item -LiteralPath $exe).Length -le 0) { throw 'Expected executable is empty' }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = "$hash  abf-win-host-bootstrap.exe"
+          Set-Content -LiteralPath "$exe.sha256" -Value $checksum -Encoding ascii
+          if ((Get-Item -LiteralPath "$exe.sha256").Length -le 0) { throw 'Checksum is empty' }
+          Write-Host $checksum
+
+      - name: Upload executable and checksum
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: abf-windows-bootstrap-x64-${{ github.sha }}
+          path: |
+            desktop/windows-bootstrap/src-tauri/target/x86_64-pc-windows-msvc/release/abf-win-host-bootstrap.exe
+            desktop/windows-bootstrap/src-tauri/target/x86_64-pc-windows-msvc/release/abf-win-host-bootstrap.exe.sha256
+          if-no-files-found: error
+          retention-days: 7
