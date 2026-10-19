@@ -126,6 +126,8 @@
 /* Content */
 .content {
   grid-area: content;
+  /* Keep absolute descendants (the hidden table caption) inside this scroller. */
+  position: relative;
   display: grid;
   align-content: start;
   gap: 1rem;
