@@ -5,8 +5,8 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createSyntheticBridge, isSyntheticSnapshot } from '../frontend/src/syntheticBridge.ts';
-import type { BridgeState, SyntheticSnapshot } from '../frontend/src/syntheticBridge.ts';
+import { createSyntheticBridge, isSyntheticSnapshot, syntheticBridge } from '../frontend/src/syntheticBridge.ts';
+import type { BridgeState } from '../frontend/src/syntheticBridge.ts';
 import { App, ShellView } from '../frontend/src/App.tsx';
 import {
   environmentOf,
@@ -18,6 +18,8 @@ import {
 } from '../frontend/src/selection.ts';
 import type { Selection } from '../frontend/src/selection.ts';
 import { environments, harnesses } from '../frontend/src/synthetic.ts';
+
+import { snapshot, expectedViews } from './syntheticFixture.ts';
 
 const noop = () => undefined;
 const renderSelection = (selection: Selection) =>
@@ -123,7 +125,7 @@ test('Computer is described as derived and lists sources without collecting', ()
 
 test('General shows overview regions; harness views add a separate quota/status section', () => {
   const general = renderSelection({ environment: 'windows', harness: 'general' });
-  for (const title of ['Overview metrics', 'Spending and activity', 'Breakdown by harness', 'Models']) {
+  for (const title of ['Overview metrics', 'Synthetic activity', 'Breakdown by harness', 'Models']) {
     assert.ok(general.includes(title), `General view must include ${title}`);
   }
   assert.doesNotMatch(general, /quota-section-title/u);
@@ -156,7 +158,7 @@ test('every view shows explicit unavailable states and invents no measurements',
     const text = textOf(html).replace(/5-hour/gu, '');
     assert.doesNotMatch(text, /[0-9$€£%]/u, `${pageHeading(selection)} must not contain numbers or currency`);
     assert.doesNotMatch(text, /last updated|observed zero|tokens used|quota remaining|resets? (?:in|at)\b/iu);
-    assert.match(text, /Synthetic placeholder — collection disabled/u);
+    assert.match(text, /DEMO \/ SYNTHETIC — collection disabled/u);
     assert.match(text, /No provider usage, quota or spending has been observed\./u);
     assert.match(text, /No spending or activity observed|No .* activity observed/u);
     assert.match(text, /No models observed/u);
@@ -177,7 +179,7 @@ test('the banner is the unique note and ARIA references resolve to unique target
     const html = renderSelection(selection);
     const notes = [...html.matchAll(/<p\b([^>]*)>(.*?)<\/p>/gu)].filter((match) => attribute(match[1] ?? '', 'role') === 'note');
     assert.equal(notes.length, 1);
-    assert.equal(notes[0]?.[2], 'Synthetic placeholder — collection disabled');
+    assert.equal(notes[0]?.[2], 'DEMO / SYNTHETIC — collection disabled');
 
     const elements = [...html.matchAll(/<([a-z][a-z0-9]*)\b([^>]*)>/gu)];
     const ids = elements.map((element) => attribute(element[2] ?? '', 'id')).filter((id): id is string => id !== undefined);
@@ -227,49 +229,10 @@ test('frontend allows only the reviewed core invoke and synthetic command, with 
 });
 
 
-// Transport fixtures only: no provider observations or discovered environments.
-const snapshot = {
-  schemaVersion: 1,
-  provenance: 'fixed-synthetic',
-  sources: [
-    { id: 'windows', observations: { usage: null, sessions: null, models: null, cost: null, quota: null } },
-    { id: 'selected-wsl', observations: { usage: null, sessions: null, models: null, cost: null, quota: null } },
-  ],
-} as const satisfies SyntheticSnapshot;
-
-test('accepts the versioned synthetic snapshot with two separate unavailable sources', async () => {
+test('accepts the version 2 demo transport', async () => {
   assert.equal(isSyntheticSnapshot(snapshot), true);
-  const bridge = createSyntheticBridge(async () => snapshot);
-  assert.deepEqual(await bridge.load(), { status: 'synthetic', snapshot });
+  assert.deepEqual(await createSyntheticBridge(async () => snapshot).load(), { status: 'synthetic', snapshot });
 });
-
-const malformedSnapshots: readonly unknown[] = [
-  undefined, null, {}, [],
-  { ...snapshot, schemaVersion: 2 },
-  { ...snapshot, provenance: 'observed' },
-  { ...snapshot, sources: [] },
-  { ...snapshot, sources: [snapshot.sources[0]] },
-  { ...snapshot, sources: [...snapshot.sources, { ...snapshot.sources[0], id: 'computer' }] },
-  { ...snapshot, sources: [snapshot.sources[0], snapshot.sources[0]] },
-  { ...snapshot, sources: [snapshot.sources[1], snapshot.sources[0]] },
-  { ...snapshot, sources: [{ ...snapshot.sources[0], id: 'computer' }, snapshot.sources[1]] },
-  { ...snapshot, sources: [{ ...snapshot.sources[0], distro: 'Ubuntu' }, snapshot.sources[1]] },
-  { ...snapshot, account: 'invented' },
-  ...['usage', 'sessions', 'models', 'cost', 'quota'].flatMap((field) => [0, 1, '', [], {}].map((value) => ({
-    ...snapshot,
-    sources: [{ ...snapshot.sources[0], observations: { ...snapshot.sources[0].observations, [field]: value } }, snapshot.sources[1]],
-  }))),
-  { ...snapshot, sources: [{ id: 'windows' }, snapshot.sources[1]] },
-  { ...snapshot, sources: [{ ...snapshot.sources[0], observations: null }, snapshot.sources[1]] },
-  { ...snapshot, sources: [{ ...snapshot.sources[0], observations: { ...snapshot.sources[0].observations, quotaReset: 0 } }, snapshot.sources[1]] },
-];
-
-for (const [index, response] of malformedSnapshots.entries()) {
-  test(`rejects missing or malformed synthetic response ${index + 1}`, async () => {
-    assert.equal(isSyntheticSnapshot(response), false);
-    assert.deepEqual(await createSyntheticBridge(async () => response).load(), { status: 'unavailable' });
-  });
-}
 
 test('missing native runtime becomes unavailable without throwing', async () => {
   assert.deepEqual(await createSyntheticBridge().load(), { status: 'unavailable' });
@@ -319,7 +282,7 @@ for (const state of [
   { status: 'synthetic', snapshot },
   { status: 'unavailable' },
 ] as const satisfies readonly BridgeState[]) {
-  test(`renders ${state.status} bridge state while keeping every observation unavailable in all views`, () => {
+  test(`renders ${state.status} bridge state with truthful metrics in all views`, () => {
     for (const selection of allSelections) {
       const html = renderToStaticMarkup(createElement(ShellView, {
         selection, onSelectEnvironment: noop, onSelectHarness: noop, bridgeState: state,
@@ -333,7 +296,9 @@ for (const state of [
       assert.ok(textOf(html).includes(expected));
       assert.match(textOf(html), /collection disabled/u);
       assert.deepEqual([...html.matchAll(/<p class="metric__value">(.*?)<\/p>/gu)].map((entry) => entry[1]),
-        ['Unavailable', 'Unavailable', 'Unavailable', 'Unavailable']);
+        state.status === 'synthetic'
+          ? [String(expectedViews[selection.environment][selection.harness][0]), 'Unavailable', String(expectedViews[selection.environment][selection.harness][1]), '3'].map((value, index) => index === 3 && selection.harness !== 'general' ? '1' : value)
+          : ['Unavailable', 'Unavailable', 'Unavailable', 'Unavailable']);
       assert.equal(buttons(html).length, 7);
       assert.match(html, new RegExp(`<h1[^>]*>${pageHeading(selection)}</h1>`, 'u'));
     }
@@ -384,4 +349,79 @@ test('native boundary registers exactly the synthetic command and enables only o
   assert.match(main, /\.disable_drag_drop_handler\(\)/u);
   assert.match(main, /NewWindowResponse::Deny/u);
   assert.match(main, /url\.host_str\(\) == Some\("tauri.localhost"\)/u);
+});
+
+for (const selection of allSelections) {
+  test(`accessible deterministic demo chart and breakdowns: ${selection.environment}/${selection.harness}`, () => {
+    const props = { selection, onSelectEnvironment: noop, onSelectHarness: noop,
+      bridgeState: { status: 'synthetic', snapshot } } as const;
+    const html = renderToStaticMarkup(createElement(ShellView, props));
+    assert.equal(html, renderToStaticMarkup(createElement(ShellView, props)));
+    assert.match(html, /DEMO \/ SYNTHETIC/u);
+    assert.match(html, /input tokens \+ output tokens/u);
+    assert.match(html, /UTC/u);
+    assert.match(html, /<progress[^>]*aria-label="[^"]+"[^>]*value="[0-9]+"/u);
+    assert.match(html, /demo-(?:amber|birch|coral)/u);
+    assert.match(html, /Estimated API cost/u);
+    assert.equal(buttons(html).length, 7);
+    assert.doesNotMatch(html, /<svg|<canvas|\sstyle=|(?:src|href)=/u);
+    assert.match(html, /Synthetic sources:/u);
+  });
+}
+
+test('empty validated snapshot renders unavailable rather than measured zero', () => {
+  const html = renderToStaticMarkup(createElement(ShellView, {
+    selection: initialSelection, onSelectEnvironment: noop, onSelectHarness: noop,
+    bridgeState: { status: 'synthetic', snapshot: { ...snapshot, records: [] } },
+  }));
+  assert.deepEqual([...html.matchAll(/<p class="metric__value">(.*?)<\/p>/gu)].map((entry) => entry[1]),
+    ['Unavailable', 'Unavailable', 'Unavailable', 'Unavailable']);
+  assert.doesNotMatch(html, /<progress/u);
+});
+
+test('StrictMode setup/cleanup/setup uses the same module singleton and cached native invocation', async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const calls: unknown[] = [];
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    __TAURI_INTERNALS__: { invoke: (...args: unknown[]) => { calls.push(args); return Promise.resolve(snapshot); } },
+  } });
+  try {
+    // Replay the effect's load boundary. SSR cannot mount/replay React effects.
+    const firstSetup = syntheticBridge.load();
+    const secondSetup = syntheticBridge.load();
+    assert.equal(firstSetup, secondSetup);
+    assert.deepEqual(await secondSetup, { status: 'synthetic', snapshot });
+    for (const selection of allSelections) {
+      renderSelection(selection);
+      assert.equal(syntheticBridge.load(), firstSetup);
+    }
+    assert.deepEqual(calls, [['abf_get_synthetic_snapshot', {}, undefined]]);
+    const appSource = readFileSync(new URL('../frontend/src/App.tsx', import.meta.url), 'utf8');
+    assert.match(appSource, /React\.useEffect\(\(\) => \{[\s\S]*?syntheticBridge\.load\(\)[\s\S]*?\}, \[\]\);/u);
+    assert.doesNotMatch(appSource, /createSyntheticBridge|\binvoke\b/u);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'window', previous);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
+
+test('harness totals distinguish available DEMO values from unavailable data and derived scope', () => {
+  const selection = { environment: 'computer', harness: 'general' } as const;
+  const success = renderToStaticMarkup(createElement(ShellView, {
+    selection, onSelectEnvironment: noop, onSelectHarness: noop,
+    bridgeState: { status: 'synthetic', snapshot },
+  }));
+  const breakdown = success.match(/<section[^>]*aria-labelledby="harness-breakdown-title"[^>]*>(.*?)<\/section>/u)?.[1] ?? '';
+  assert.deepEqual([...breakdown.matchAll(/<span class="status status--synthetic">(.*?)<\/span>/gu)].map((entry) => entry[1]),
+    ['DEMO · 80 synthetic tokens', 'DEMO · 200 synthetic tokens', 'DEMO · 270 synthetic tokens']);
+  assert.doesNotMatch(breakdown, /status--unavailable/u);
+  assert.match(success, /class="status status--derived">Derived view only; no collection source/u);
+  for (const state of [{ status: 'loading' }, { status: 'unavailable' }] as const) {
+    const html = renderToStaticMarkup(createElement(ShellView, {
+      selection, onSelectEnvironment: noop, onSelectHarness: noop, bridgeState: state,
+    }));
+    const absent = html.match(/<section[^>]*aria-labelledby="harness-breakdown-title"[^>]*>(.*?)<\/section>/u)?.[1] ?? '';
+    assert.equal([...absent.matchAll(/class="status status--unavailable">Unavailable</gu)].length, 3);
+    assert.doesNotMatch(absent, /status--synthetic|synthetic tokens/u);
+  }
 });

@@ -82,7 +82,7 @@ export const harnesses = Object.freeze([
 
 export const shellText = Object.freeze({
   product: 'Agent Burn Fork',
-  banner: 'Synthetic placeholder — collection disabled',
+  banner: 'DEMO / SYNTHETIC — collection disabled',
   explanation: 'No provider usage, quota or spending has been observed.',
   quotaScope: 'Quota is provider and account scoped, not environment scoped; it is never summed across environments.',
   statusBar: 'Synthetic shell · no data source connected · nothing has been observed',

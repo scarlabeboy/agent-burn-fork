@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { aggregateSynthetic } from './syntheticAggregation.ts';
 import { syntheticBridge } from './syntheticBridge.ts';
 import type { BridgeState } from './syntheticBridge.ts';
 import { environmentOf, harnessOf, initialSelection, pageHeading, selectEnvironment, selectHarness } from './selection.ts';
@@ -15,7 +16,7 @@ type ShellViewProps = Readonly<{
   bridgeState?: BridgeState;
 }>;
 
-function Status({ tone, children }: Readonly<{ tone: 'unavailable' | 'derived'; children: React.ReactNode }>): React.JSX.Element {
+function Status({ tone, children }: Readonly<{ tone: 'unavailable' | 'derived' | 'synthetic'; children: React.ReactNode }>): React.JSX.Element {
   return <span className={`status status--${tone}`}>{children}</span>;
 }
 
@@ -53,6 +54,10 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
   const harness = harnessOf(selection);
   const isGeneral = harness.id === 'general';
   const derived = environment.kind === 'derived';
+  const summary = aggregateSynthetic(bridgeState.status === 'synthetic' ? bridgeState.snapshot : null,
+    environment.id, harness.id);
+  const values = [summary?.tokens, undefined, summary?.sessions, summary?.models.length];
+  const sourceNames = summary?.sources.map((source) => environments.find((entry) => entry.id === source)?.label).join(' + ');
 
   return (
     <div className="app" data-environment={environment.id} data-harness={harness.id}>
@@ -105,18 +110,22 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
         <p className="page-note">{shellText.explanation}</p>
         <p className="page-note" role="status">
           {bridgeState.status === 'synthetic'
-            ? 'Local synthetic bridge responded · collection disabled'
+            ? 'Local synthetic bridge responded · DEMO / SYNTHETIC · collection disabled'
             : bridgeState.status === 'loading'
               ? 'Local synthetic bridge: loading · collection disabled'
               : 'Local synthetic bridge unavailable · collection disabled'}
         </p>
 
+        {summary ? <p className="page-note">Synthetic sources: {sourceNames}. Tokens = input tokens + output tokens.
+          Sessions use source/harness identities, joined only by explicit fixture equivalence in Computer.
+          Demo equivalents count once; unrelated matching values remain distinct.</p> : null}
+
         <section className="metrics" aria-label="Overview metrics">
-          {metricLabels.map((label) => (
+          {metricLabels.map((label, index) => (
             <article className="metric" key={label}>
               <h2 className="metric__label">{label}</h2>
-              <p className="metric__value">{unavailable}</p>
-              <p className="metric__detail">Not observed</p>
+              <p className="metric__value">{values[index] ?? unavailable}</p>
+              <p className="metric__detail">{values[index] === undefined ? 'Not observed' : 'DEMO / SYNTHETIC'}</p>
             </article>
           ))}
         </section>
@@ -132,19 +141,30 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
         )}
 
         <div className="grid">
-          <Region id="activity" title={isGeneral ? 'Spending and activity' : `${harness.label} activity`}>
-            <EmptyState title="No spending or activity observed" detail="Collection is disabled, so this chart has no data." />
+          <Region id="activity" title={isGeneral ? 'Synthetic activity' : `${harness.label} synthetic activity`}>
+            {summary ? <ul className="activity">
+              {summary.activity.map((day) => <li className="activity__day" key={day.id}>
+                <span>{day.id} UTC · {day.tokens} synthetic tokens</span>
+                <progress aria-label={`${day.id} UTC synthetic tokens`} value={day.tokens}
+                  max={Math.max(1, ...summary.activity.map((row) => row.tokens))}>{day.tokens} tokens</progress>
+              </li>)}
+            </ul> : <EmptyState title="No spending or activity observed" detail="No synthetic activity available. Collection is disabled." />}
           </Region>
 
           {isGeneral ? (
             <Region id="harness-breakdown" title="Breakdown by harness">
               <ul className="breakdown">
-                {harnesses.filter((entry) => entry.id !== 'general').map((entry) => (
-                  <li className="breakdown__row" key={entry.id}>
-                    <span>{entry.label}</span>
-                    <Status tone="unavailable">{unavailable}</Status>
-                  </li>
-                ))}
+                {harnesses.filter((entry) => entry.id !== 'general').map((entry) => {
+                  const tokens = summary?.harnesses.find((row) => row.id === entry.id)?.tokens;
+                  return (
+                    <li className="breakdown__row" key={entry.id}>
+                      <span>{entry.label}</span>
+                      <Status tone={tokens === undefined ? 'unavailable' : 'synthetic'}>
+                        {tokens === undefined ? unavailable : `DEMO · ${tokens} synthetic tokens`}
+                      </Status>
+                    </li>
+                  );
+                })}
               </ul>
             </Region>
           ) : null}
@@ -173,9 +193,13 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
                 </tr>
               </thead>
               <tbody>
-                <tr>
+                {summary ? summary.models.map((model) => <tr key={model.id}>
+                  <th scope="row">{model.id} (DEMO)</th>
+                  <td>{model.tokens}</td>
+                  <td>{unavailable}</td>
+                </tr>) : <tr>
                   <td colSpan={3}>No models observed. Collection is disabled.</td>
-                </tr>
+                </tr>}
               </tbody>
             </table>
           </Region>

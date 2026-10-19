@@ -1,7 +1,7 @@
 # ABF Windows Bootstrap
 
 An isolated, unpublished Windows x64 Tauri v2 host candidate with a bundled React,
-TypeScript and Vite frontend. It displays fixed synthetic placeholders only.
+TypeScript and Vite frontend. It displays a fixed synthetic demo only.
 Windows and Selected WSL are distinct display fixtures; Computer is a derived
 view, never a collection source. No provider data, quota, cost or usage is observed.
 
@@ -62,7 +62,30 @@ at an existing Agent Burn installation or real user data.
 
 Exactly one synthetic application command, `abf_get_synthetic_snapshot`, takes
 no arguments and returns fixed synthetic data. Windows and Selected WSL are its
-only source entries; Computer remains a derived view. All observations are null.
+only source entries; Computer remains a derived view. The historical M6D schema v1
+returned null-only placeholders. M6E explicitly evolves the response to schema v2
+with 12 deterministic demo records across Claude Code, Codex and OpenCode, three
+fictional demo models and fixed UTC day buckets (2026-01-01 through 2026-01-03).
+This is a DEMO TRANSPORT FIXTURE, not an approved production event/database schema.
+
+Tokens are input + output. Windows totals 235 tokens / 5 sessions; Selected WSL
+totals 330 / 4. Computer totals 550 / 8 across 11 logical occurrences. Only the
+explicit `demo-copy` equivalence pair (one record per source, identical harness,
+model, day and token counts) is counted once. Source/harness/sessionId identifies
+a local synthetic session; the equivalence pair joins its containing sessions
+for Computer. Matching session labels, dates, models or tokens alone never join
+records or sessions. Original record identities and both source provenances are
+retained. These are fixture-only conventions, not production identity rules.
+
+React validates exact v2 fields, demo identities, calendar dates, unique record
+IDs, equivalence consistency, at most 100 records and at most 1,000,000 tokens
+per input/output field before deterministic aggregation. Empty, failed or invalid
+data stays unavailable. One cached invocation serves all 12 filter views without
+polling or retries. Visible DEMO / SYNTHETIC metrics, UTC activity meters, model
+and General harness breakdowns describe demo data only. Estimated API cost,
+actual billed cost, subscription-equivalent value, quotas and resets remain
+unavailable; quota remains provider/account scoped.
+
 There are no real collectors, provider-history or credential reads, account
 discovery, observation persistence, background workers, plugins, updater, tray
 or autostart. Installer bundling remains disabled.
@@ -82,8 +105,8 @@ environment. It records reused registry provenance, exact commands and source
 hashes. The source snapshot includes both genuine locks and the binary ICO.
 Frontend typechecks, server-render tests, production build and static checks are
 the bounded acceptance scope of that historical gate. It does not validate the
-current M6D synthetic bridge. For M6D, native Windows compilation, WebView2 IPC,
+current M6E demo bridge. For M6D and M6E, native Windows compilation, WebView2 IPC,
 rendering, CSP enforcement, profile isolation, OS compatibility and coexistence
-are NOT_RUN. No M6D native IPC operation or production integration is claimed. Native
+are NOT_RUN. No M6D/M6E native IPC operation or production integration is claimed. Native
 compilation or startup requires a separate gate; do not run cargo check, tauri
 dev/build, native installers or a development server as part of these checks.
