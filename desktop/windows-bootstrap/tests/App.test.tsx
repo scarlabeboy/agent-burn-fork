@@ -5,6 +5,8 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { createSyntheticBridge, isSyntheticSnapshot } from '../frontend/src/syntheticBridge.ts';
+import type { BridgeState, SyntheticSnapshot } from '../frontend/src/syntheticBridge.ts';
 import { App, ShellView } from '../frontend/src/App.tsx';
 import {
   environmentOf,
@@ -201,7 +203,7 @@ test('renders deterministically without runtime inputs', () => {
   }
 });
 
-test('frontend sources contain no IPC, network, timer, storage or external-resource usage', () => {
+test('frontend allows only the reviewed core invoke and synthetic command, with no network, timers or storage', () => {
   const root = fileURLToPath(new URL('../frontend/src/', import.meta.url));
   const files = (directory: string): string[] =>
     readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
@@ -210,8 +212,176 @@ test('frontend sources contain no IPC, network, timer, storage or external-resou
   const sources = files(root).filter((file) => /\.(?:tsx?|css)$/u.test(file));
   assert.ok(sources.length >= 6);
   const forbidden =
-    /@tauri-apps|__TAURI|\binvoke\s*\(|\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|setInterval|setTimeout|requestAnimationFrame|localStorage|sessionStorage|indexedDB|document\.cookie|node:fs|child_process|https?:\/\/|@import|url\(|@font-face/u;
+    /@tauri-apps|__TAURI|\binvoke\s*(?:<[^>]*>)?\s*\(|\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|setInterval|setTimeout|requestAnimationFrame|localStorage|sessionStorage|indexedDB|document\.cookie|node:fs|child_process|https?:\/\/|@import|url\(|@font-face/u;
   for (const file of sources) {
-    assert.doesNotMatch(readFileSync(file, 'utf8'), forbidden, `${file} must not use forbidden capabilities`);
+    let source = readFileSync(file, 'utf8');
+    if (file === join(root, 'syntheticBridge.ts')) {
+      const allowedImport = "import { invoke } from '@tauri-apps/api/core';";
+      const allowedCall = "invoke<unknown>('abf_get_synthetic_snapshot')";
+      assert.equal(source.split(allowedImport).length, 2, 'one official core invoke import');
+      assert.equal(source.split(allowedCall).length, 2, 'one argument-free approved application command');
+      source = source.replace(allowedImport, '').replace(allowedCall, '');
+    }
+    assert.doesNotMatch(source, forbidden, `${file} must not use forbidden capabilities`);
   }
+});
+
+
+// Transport fixtures only: no provider observations or discovered environments.
+const snapshot = {
+  schemaVersion: 1,
+  provenance: 'fixed-synthetic',
+  sources: [
+    { id: 'windows', observations: { usage: null, sessions: null, models: null, cost: null, quota: null } },
+    { id: 'selected-wsl', observations: { usage: null, sessions: null, models: null, cost: null, quota: null } },
+  ],
+} as const satisfies SyntheticSnapshot;
+
+test('accepts the versioned synthetic snapshot with two separate unavailable sources', async () => {
+  assert.equal(isSyntheticSnapshot(snapshot), true);
+  const bridge = createSyntheticBridge(async () => snapshot);
+  assert.deepEqual(await bridge.load(), { status: 'synthetic', snapshot });
+});
+
+const malformedSnapshots: readonly unknown[] = [
+  undefined, null, {}, [],
+  { ...snapshot, schemaVersion: 2 },
+  { ...snapshot, provenance: 'observed' },
+  { ...snapshot, sources: [] },
+  { ...snapshot, sources: [snapshot.sources[0]] },
+  { ...snapshot, sources: [...snapshot.sources, { ...snapshot.sources[0], id: 'computer' }] },
+  { ...snapshot, sources: [snapshot.sources[0], snapshot.sources[0]] },
+  { ...snapshot, sources: [snapshot.sources[1], snapshot.sources[0]] },
+  { ...snapshot, sources: [{ ...snapshot.sources[0], id: 'computer' }, snapshot.sources[1]] },
+  { ...snapshot, sources: [{ ...snapshot.sources[0], distro: 'Ubuntu' }, snapshot.sources[1]] },
+  { ...snapshot, account: 'invented' },
+  ...['usage', 'sessions', 'models', 'cost', 'quota'].flatMap((field) => [0, 1, '', [], {}].map((value) => ({
+    ...snapshot,
+    sources: [{ ...snapshot.sources[0], observations: { ...snapshot.sources[0].observations, [field]: value } }, snapshot.sources[1]],
+  }))),
+  { ...snapshot, sources: [{ id: 'windows' }, snapshot.sources[1]] },
+  { ...snapshot, sources: [{ ...snapshot.sources[0], observations: null }, snapshot.sources[1]] },
+  { ...snapshot, sources: [{ ...snapshot.sources[0], observations: { ...snapshot.sources[0].observations, quotaReset: 0 } }, snapshot.sources[1]] },
+];
+
+for (const [index, response] of malformedSnapshots.entries()) {
+  test(`rejects missing or malformed synthetic response ${index + 1}`, async () => {
+    assert.equal(isSyntheticSnapshot(response), false);
+    assert.deepEqual(await createSyntheticBridge(async () => response).load(), { status: 'unavailable' });
+  });
+}
+
+test('missing native runtime becomes unavailable without throwing', async () => {
+  assert.deepEqual(await createSyntheticBridge().load(), { status: 'unavailable' });
+});
+
+test('native rejection becomes unavailable without exposing native error details', async () => {
+  const bridge = createSyntheticBridge(() => Promise.reject(new Error('private details')));
+  assert.deepEqual(await bridge.load(), { status: 'unavailable' });
+});
+
+test('synchronous invocation failure becomes unavailable', async () => {
+  const bridge = createSyntheticBridge(() => { throw new Error('missing runtime'); });
+  assert.deepEqual(await bridge.load(), { status: 'unavailable' });
+});
+
+test('one bridge request is shared across repeated consumers and all filter changes', async () => {
+  let requests = 0;
+  let respond: (value: unknown) => void = noop;
+  const bridge = createSyntheticBridge(() => {
+    requests += 1;
+    return new Promise<unknown>((resolve) => { respond = resolve; });
+  });
+  const first = bridge.load();
+  const second = bridge.load();
+  assert.equal(first, second);
+  await Promise.resolve();
+  assert.equal(requests, 1);
+  respond(snapshot);
+  assert.deepEqual(await first, { status: 'synthetic', snapshot });
+  for (const selection of allSelections) {
+    renderSelection(selection);
+    assert.equal(bridge.load(), first);
+  }
+  assert.equal(requests, 1);
+});
+
+test('unavailable invocation is cached without automatic retries', async () => {
+  let requests = 0;
+  const bridge = createSyntheticBridge(async () => { requests += 1; throw new Error('offline'); });
+  await bridge.load();
+  await bridge.load();
+  assert.equal(requests, 1);
+});
+
+for (const state of [
+  { status: 'loading' },
+  { status: 'synthetic', snapshot },
+  { status: 'unavailable' },
+] as const satisfies readonly BridgeState[]) {
+  test(`renders ${state.status} bridge state while keeping every observation unavailable in all views`, () => {
+    for (const selection of allSelections) {
+      const html = renderToStaticMarkup(createElement(ShellView, {
+        selection, onSelectEnvironment: noop, onSelectHarness: noop, bridgeState: state,
+      }));
+      const expected = {
+        loading: 'Local synthetic bridge: loading',
+        synthetic: 'Local synthetic bridge responded',
+        unavailable: 'Local synthetic bridge unavailable',
+      }[state.status];
+      assert.match(html, /role="status"/u);
+      assert.ok(textOf(html).includes(expected));
+      assert.match(textOf(html), /collection disabled/u);
+      assert.deepEqual([...html.matchAll(/<p class="metric__value">(.*?)<\/p>/gu)].map((entry) => entry[1]),
+        ['Unavailable', 'Unavailable', 'Unavailable', 'Unavailable']);
+      assert.equal(buttons(html).length, 7);
+      assert.match(html, new RegExp(`<h1[^>]*>${pageHeading(selection)}</h1>`, 'u'));
+    }
+  });
+}
+
+
+test('official core invoke sends only the approved command with no frontend arguments', async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const calls: unknown[] = [];
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    __TAURI_INTERNALS__: { invoke: (...args: unknown[]) => { calls.push(args); return Promise.resolve(snapshot); } },
+  } });
+  try {
+    assert.deepEqual(await createSyntheticBridge().load(), { status: 'synthetic', snapshot });
+    assert.deepEqual(calls, [['abf_get_synthetic_snapshot', {}, undefined]]);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'window', previous);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
+
+test('native boundary registers exactly the synthetic command and enables only official IPC CSP endpoints', () => {
+  const nativeRoot = new URL('../src-tauri/', import.meta.url);
+  const main = readFileSync(new URL('src/main.rs', nativeRoot), 'utf8');
+  const command = readFileSync(new URL('src/synthetic_snapshot.rs', nativeRoot), 'utf8');
+  const build = readFileSync(new URL('build.rs', nativeRoot), 'utf8');
+  const config = JSON.parse(readFileSync(new URL('tauri.conf.json', nativeRoot), 'utf8'));
+  const handlers = [...main.matchAll(/\.invoke_handler\(tauri::generate_handler!\[([^\]]*)\]\)/gu)];
+  assert.deepEqual(handlers.map((match) => match[1]?.trim()), ['synthetic_snapshot::abf_get_synthetic_snapshot']);
+  assert.equal([...command.matchAll(/#\[tauri::command\]/gu)].length, 1);
+  assert.match(command, /fn abf_get_synthetic_snapshot\(\)/u);
+  assert.doesNotMatch(command, /std::|tauri::(?:State|AppHandle|Manager)|\b(?:use|mod)\b|\b(?:async|unsafe)\b|SystemTime|rand|thread|spawn|include!|include_str!|include_bytes!/u);
+  assert.equal(config.identifier, 'dev.scarlabeboy.abf.windowsbootstrap');
+  assert.equal(config.app.withGlobalTauri, false);
+  assert.deepEqual(config.app.windows, []);
+  assert.deepEqual(config.app.security.capabilities, []);
+  assert.equal(
+    readdirSync(nativeRoot).includes('capabilities'), false,
+    'src-tauri/capabilities must remain absent; unexpected capability directories or files require review',
+  );
+  assert.equal(config.bundle.active, false);
+  assert.doesNotMatch(build, /app_manifest|commands/u, 'no app ACL manifest: local custom command default applies');
+  const directives = config.app.security.csp.split(';').map((entry: string) => entry.trim());
+  assert.ok(directives.includes('connect-src ipc: http://ipc.localhost'));
+  assert.ok(directives.includes("default-src 'none'"));
+  assert.doesNotMatch(config.app.security.csp.replace('http://ipc.localhost', ''), /https?:|wss?:|\*/u);
+  assert.match(main, /\.disable_drag_drop_handler\(\)/u);
+  assert.match(main, /NewWindowResponse::Deny/u);
+  assert.match(main, /url\.host_str\(\) == Some\("tauri.localhost"\)/u);
 });

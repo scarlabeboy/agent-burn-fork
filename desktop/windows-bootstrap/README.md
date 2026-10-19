@@ -29,8 +29,9 @@ are registered and counted under the supplied Node/tsx pair. Tests run in a
 separate command process and use only synthetic render inputs.
 
 The build writes only this workspace's dist/. There is no dev-server script.
-No Tauri JS API or CLI package is installed. All frontend dependencies, including
-the bundled React runtime, are pinned in devDependencies. The reviewed esbuild
+The official Tauri JS API is pinned to 2.12.3; no Tauri CLI package is installed.
+All frontend dependencies, including the bundled React runtime, are pinned in
+devDependencies. The reviewed esbuild
 optional platform package allows the tests to run without its postinstall script.
 Do not enable scripts or allow missing-binary fallback downloads.
 
@@ -59,22 +60,30 @@ mapped drives), permissions, environment/registry overrides and coexistence.
 Lexical acceptance is not filesystem-isolation proof. Never point this variable
 at an existing Agent Burn installation or real user data.
 
-There are no application commands, capability files, plugins, collectors,
-persistence, background workers, updater, tray or autostart. Empty capability
-selection includes any capability files present, so the absence of those files
-is part of this candidate's boundary. Production CSP permits packaged scripts
-and styles and denies frontend connections. Native navigation is restricted to
-the packaged origin and new-window requests are denied. Framework internals are
-not an application IPC contract or permission to collect data.
+Exactly one synthetic application command, `abf_get_synthetic_snapshot`, takes
+no arguments and returns fixed synthetic data. Windows and Selected WSL are its
+only source entries; Computer remains a derived view. All observations are null.
+There are no real collectors, provider-history or credential reads, account
+discovery, observation persistence, background workers, plugins, updater, tray
+or autostart. Installer bundling remains disabled.
+
+The capability list is empty and no capability directory or files are present;
+the directory-absence regression guard does not prove the complete permission
+model. Production CSP permits packaged scripts/styles and only the required
+local Tauri IPC transport (`ipc:` and `http://ipc.localhost`) for connections.
+External frontend network connections remain denied; no external network access
+is implemented. Native navigation remains restricted to the packaged origin,
+and new-window requests are denied. Synthetic IPC does not activate collection.
 
 ## Evidence and limits
 
-M5B-R2 evidence is under /tmp/abf47c-m5b-react-bootstrap/ in the validation
+Historical M5B-R2 evidence is under /tmp/abf47c-m5b-react-bootstrap/ in the validation
 environment. It records reused registry provenance, exact commands and source
 hashes. The source snapshot includes both genuine locks and the binary ICO.
 Frontend typechecks, server-render tests, production build and static checks are
-the bounded acceptance scope. Native Windows compilation, WebView2 rendering,
-CSP enforcement, profile isolation, OS compatibility and coexistence are NOT_RUN.
-No working native executable or production integration is claimed. Native
+the bounded acceptance scope of that historical gate. It does not validate the
+current M6D synthetic bridge. For M6D, native Windows compilation, WebView2 IPC,
+rendering, CSP enforcement, profile isolation, OS compatibility and coexistence
+are NOT_RUN. No M6D native IPC operation or production integration is claimed. Native
 compilation or startup requires a separate gate; do not run cargo check, tauri
 dev/build, native installers or a development server as part of these checks.

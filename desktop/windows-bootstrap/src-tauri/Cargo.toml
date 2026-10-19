@@ -12,6 +12,7 @@ default = []
 custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
 tauri = "=2.12.3"
 
 [build-dependencies]

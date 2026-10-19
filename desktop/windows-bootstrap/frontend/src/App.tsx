@@ -1,4 +1,6 @@
 import * as React from 'react';
+import { syntheticBridge } from './syntheticBridge.ts';
+import type { BridgeState } from './syntheticBridge.ts';
 import { environmentOf, harnessOf, initialSelection, pageHeading, selectEnvironment, selectHarness } from './selection.ts';
 import type { Selection } from './selection.ts';
 import { environments, harnesses, shellText, unavailable } from './synthetic.ts';
@@ -10,6 +12,7 @@ type ShellViewProps = Readonly<{
   selection: Selection;
   onSelectEnvironment: (id: EnvironmentId) => void;
   onSelectHarness: (id: HarnessId) => void;
+  bridgeState?: BridgeState;
 }>;
 
 function Status({ tone, children }: Readonly<{ tone: 'unavailable' | 'derived'; children: React.ReactNode }>): React.JSX.Element {
@@ -45,7 +48,7 @@ function QuotaPanel({ panel }: Readonly<{ panel: QuotaPanelDefinition }>): React
   );
 }
 
-export function ShellView({ selection, onSelectEnvironment, onSelectHarness }: ShellViewProps): React.JSX.Element {
+export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bridgeState = { status: 'loading' } }: ShellViewProps): React.JSX.Element {
   const environment = environmentOf(selection);
   const harness = harnessOf(selection);
   const isGeneral = harness.id === 'general';
@@ -100,6 +103,13 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness }: S
         </div>
         <p className="page-scope">{environment.scope}</p>
         <p className="page-note">{shellText.explanation}</p>
+        <p className="page-note" role="status">
+          {bridgeState.status === 'synthetic'
+            ? 'Local synthetic bridge responded · collection disabled'
+            : bridgeState.status === 'loading'
+              ? 'Local synthetic bridge: loading · collection disabled'
+              : 'Local synthetic bridge unavailable · collection disabled'}
+        </p>
 
         <section className="metrics" aria-label="Overview metrics">
           {metricLabels.map((label) => (
@@ -181,6 +191,12 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness }: S
 
 export function App(): React.JSX.Element {
   const [selection, setSelection] = React.useState<Selection>(initialSelection);
+  const [bridgeState, setBridgeState] = React.useState<BridgeState>({ status: 'loading' });
+  React.useEffect(() => {
+    let active = true;
+    void syntheticBridge.load().then((state) => { if (active) setBridgeState(state); });
+    return () => { active = false; };
+  }, []);
   const onSelectEnvironment = React.useCallback(
     (id: EnvironmentId) => setSelection((current) => selectEnvironment(current, id)),
     [],
@@ -189,5 +205,5 @@ export function App(): React.JSX.Element {
     (id: HarnessId) => setSelection((current) => selectHarness(current, id)),
     [],
   );
-  return <ShellView selection={selection} onSelectEnvironment={onSelectEnvironment} onSelectHarness={onSelectHarness} />;
+  return <ShellView selection={selection} onSelectEnvironment={onSelectEnvironment} onSelectHarness={onSelectHarness} bridgeState={bridgeState} />;
 }

@@ -6,6 +6,7 @@ version = 4
 name = "abf-win-host-bootstrap"
 version = "0.0.0"
 dependencies = [
+ "serde",
  "tauri",
  "tauri-build",
 ]
