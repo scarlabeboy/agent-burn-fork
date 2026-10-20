@@ -1,0 +1,31 @@
+[package]
+name = "abf-counting"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = false
+autobins = false
+autotests = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+abf-identity-relations = { path = "../abf-identity-relations", version = "=0.1.0" }
+abf-observation = { path = "../abf-observation", version = "=0.1.0" }
+abf-parser = { path = "../abf-parser", version = "=0.1.0" }
+
+# Explicit targets keep the shared helper `tests/support.rs` out of the target list.
+[[test]]
+name = "scenarios"
+path = "tests/scenarios.rs"
+
+[[test]]
+name = "invariants"
+path = "tests/invariants.rs"
+
+[[test]]
+name = "regressions"
+path = "tests/regressions.rs"
