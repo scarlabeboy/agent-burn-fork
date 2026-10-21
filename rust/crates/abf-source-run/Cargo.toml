@@ -1,0 +1,13 @@
+[package]
+name = "abf-source-run"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = false
+autobins = false
+
+[workspace]
+
+[dependencies]
+abf-parser = { path = "../abf-parser", version = "=0.1.0" }
+abf-observation = { path = "../abf-observation", version = "=0.1.0" }
