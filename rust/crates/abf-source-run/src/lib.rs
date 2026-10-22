@@ -22,3 +22,5 @@ mod diagnostics;
 pub use diagnostics::*;
 mod evidence;
 pub use evidence::DeliveryEvidence;
+mod membership;
+pub use membership::*;

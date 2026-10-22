@@ -153,6 +153,8 @@ fn finalize_inner(
     let mut members: Vec<_> = scopes
         .iter()
         .map(|scope| FinalizedMember {
+            catalog: catalog.clone(),
+            manifest: raw.manifest.clone(),
             scope: scope.clone(),
             enumeration: EnumerationOutcome::NotAttempted,
             sources: Vec::new(),

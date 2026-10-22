@@ -1,9 +1,10 @@
 # abf-source-run
 
-Bounded, synthetic-only G4B-1 evidence companion to the accepted Agent Burn
-crates. This isolated unpublished Cargo workspace implements V1.6 from ABF107O,
-with the two ABF107L acceptance errata. It performs no I/O, collection, process
-execution, clock reads, network access, persistence or usage projection.
+Bounded, synthetic-only G4B-1 evidence and G4B-2A admission companion to the
+accepted Agent Burn crates. This isolated unpublished Cargo workspace implements
+the V1.7 synthetic evidence and membership contract, with the two ABF107L
+acceptance errata and the gate-local ABF108D admission decisions below. It performs no I/O, collection, process execution, clock reads,
+network access, persistence or usage projection.
 
 `CatalogBuilder` assigns unique catalog tags. `FixtureRefIssuer` creates fictional
 instances separately from listing their existing references. Labelled creation
@@ -95,20 +96,62 @@ DeliveryIndex follows the local input list and is excluded from comparisons betw
 permutations. Enumeration member indices refer to the supplied manifest; reorder
 those indices with the manifest when testing equivalent inputs.
 
-Deliberately deferred to G4B-2: ProjectionMembership, A1–A10/A8b (including A5),
-adapter M1–M13, project_with_companion, PairedProjection, calls to
-abf_counting::project, G3B figures, projection/refusal conservation, and external
-construction compile-fail tests. The existing crates remain independently usable.
+G4B-2A admission is separate from projection. Use the re-exported counting
+`Selection`, `SelectedRefs { windows, selected_wsl }` (optional opaque refs), and
+`ProjectionMembership::validate(selection, selected_refs, members, &catalog)`.
+The member slice contains references to immutable `FinalizedMember`s. Validation
+checks A1–A5, the ABF108D catalog-authority precondition, A6–A8, A8b, then
+independent checked A9 ceilings (128 retained records and 128 expected-source
+declarations), returning the first fixed `AdaptCode` for the
+whole membership. No accepted membership or downstream artifact exists on refusal;
+original finalizations remain inspectable. A5 is enabled: layout versions of one
+family cannot be co-admitted. Distinct allowed families and environments can be.
+`CatalogBuilder::declare_overlap` records symmetric possible-overlap claims between
+registered scopes for A6; no physical overlap is inferred. Each finalized member
+privately retains its complete ordered execution manifest for A7.
+
+ABF108D D1 adds `CatalogAuthorityMismatch` after A5 and before A6. Every member
+of a nonempty membership must have been finalized against the same immutable
+catalog authority supplied to admission. A snapshot clone preserves that authority;
+a separately built snapshot does not, even with identical entries and overlaps.
+Empty, re-tagged, incomplete or overlap-stripped replacements cannot substitute
+for it. Multiple finalizations and Windows/Selected WSL members can share one
+catalog authority. The snapshot and the authority bound to finalized members have
+no public mutation or replacement API. With the correct authority, declared
+overlap still returns `DeclaredCatalogOverlap`. Source binding remains the
+finalizer's guarantee. This is a bounded synthetic gate decision, not production
+catalog policy or a change to the frozen V1.7 documents.
+
+ABF108D D2 clarifies A8b: both initial expected references and additional sources
+preserved from a performed second enumeration participate in cross-scope namespace
+validation, independently of the attempt/run reference. Repetition within one
+member does not create a cross-scope conflict. Second discoveries remain outside
+A8 run keys and both A9 populations; they create no declarations or records.
+
+Successful memberships expose read-only `selection()`, `selected_refs()` and
+`members()`. Members are canonical by kind (Windows, Selected WSL), environment
+ref, family and layout (the harness is always OpenCode). No caller input order
+breaks ties: A4 already excludes equal scopes. Private fields, no default or
+unchecked conversion, and external compile-fail examples enforce validated-only
+construction. Empty memberships are valid when selected refs match; unknown,
+empty or unavailable inventories keep their original evidence and verdicts.
+
+Deliberately deferred to G4B-2B: adapter M1–M13, project_with_companion,
+PairedProjection, calls to abf_counting::project, G3B figures and adaptation
+conservation. The counting dependency supplies only its accepted Selection type;
+no projection is called. The existing crates remain independently usable.
 Production readers, identity, clocks, filesystem and transport semantics remain
 unapproved. No runtime P-R/P-F modes or physical-event deduplication exist.
 
 Acceptance errata: R99g quarantines the two **f3** variants; it has no f5.
 The defined boundary set is **R101a–R101f**; no R101g is invented.
 
-Run locally, using an isolated target directory:
+Run offline from this standalone crate, reusing its ignored local target directory:
 
 ```sh
-CARGO_TARGET_DIR=/tmp/abf107q-g4b1-ua7-rust-correction/target cargo test --offline --locked --manifest-path rust/crates/abf-source-run/Cargo.toml
+cargo fmt --check --manifest-path rust/crates/abf-source-run/Cargo.toml
+cargo test --offline --locked --manifest-path rust/crates/abf-source-run/Cargo.toml
+cargo clippy --offline --locked --manifest-path rust/crates/abf-source-run/Cargo.toml --all-targets -- -D warnings
 ```
 
 The gate's external coverage report records actual executable results and deferred

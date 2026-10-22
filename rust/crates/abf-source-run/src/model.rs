@@ -201,7 +201,7 @@ pub struct ReaderFrame {
     pub frame_seq: u64,
     pub payload: Payload,
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ExecutionManifest {
     pub attempt: AttemptRef,
     pub finalization: FinalizationId,
@@ -438,8 +438,17 @@ impl RetainedRecord {
         &self.result
     }
 }
+/// Immutable finalized evidence, including its bound catalog authority.
+/// ```compile_fail,E0616
+/// use abf_source_run::{FinalizedMember, CatalogSnapshot};
+/// fn rebind(member: &mut FinalizedMember, catalog: CatalogSnapshot) {
+///     member.catalog = catalog;
+/// }
+/// ```
 #[derive(Clone)]
 pub struct FinalizedMember {
+    pub(crate) catalog: crate::CatalogSnapshot,
+    pub(crate) manifest: ExecutionManifest,
     pub(crate) scope: CatalogScope,
     pub(crate) enumeration: EnumerationOutcome,
     pub(crate) sources: Vec<(SourceRef, SourceReconciliation)>,

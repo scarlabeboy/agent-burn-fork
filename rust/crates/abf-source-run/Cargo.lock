@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "abf-counting"
+version = "0.1.0"
+dependencies = [
+ "abf-identity-relations",
+ "abf-observation",
+ "abf-parser",
+]
+
+[[package]]
+name = "abf-identity-relations"
+version = "0.1.0"
+dependencies = [
+ "abf-observation",
+]
+
+[[package]]
 name = "abf-observation"
 version = "0.1.0"
 dependencies = [
@@ -17,6 +33,7 @@ version = "0.1.0"
 name = "abf-source-run"
 version = "0.1.0"
 dependencies = [
+ "abf-counting",
  "abf-observation",
  "abf-parser",
 ]

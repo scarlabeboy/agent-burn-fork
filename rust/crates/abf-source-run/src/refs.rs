@@ -1,4 +1,5 @@
 use crate::{EnvironmentKind, OpaqueRef};
+use std::sync::Arc;
 
 pub const MAX_INSTANCES_PER_SCOPE: u32 = 256;
 pub const MAX_EXECUTIONS_PER_ISSUER: u32 = 1024;
@@ -127,16 +128,48 @@ impl FinalizationId {
     }
 }
 
+/// Immutable catalog content and authority. `clone()` preserves authority;
+/// rebuilding equal content does not. No public mutation or authority accessor.
+/// ```compile_fail,E0616
+/// use abf_source_run::CatalogSnapshot;
+/// fn replace(catalog: &mut CatalogSnapshot, other: CatalogSnapshot) {
+///     catalog.authority = other.authority;
+/// }
+/// ```
+/// ```compile_fail,E0599
+/// use abf_source_run::{CatalogSnapshot, CatalogScope};
+/// fn edit(catalog: &mut CatalogSnapshot, scope: &CatalogScope) {
+///     catalog.declare_overlap(scope, scope);
+/// }
+/// ```
 #[derive(Clone, PartialEq, Eq)]
 pub struct CatalogSnapshot {
+    authority: Arc<CatalogAuthority>,
+}
+// Contents and ownership stay private: no mutable Arc, interior mutability or
+// public way to rebuild a snapshot while preserving another allocation's authority.
+#[derive(PartialEq, Eq)]
+struct CatalogAuthority {
     entries: Vec<(CatalogScope, String)>,
+    overlaps: Vec<(CatalogScope, CatalogScope)>,
 }
 impl CatalogSnapshot {
+    pub(crate) fn same_authority(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.authority, &other.authority)
+    }
+    /// Symmetric synthetic catalog claim; never inferred from paths or records.
+    pub(crate) fn possibly_overlapping(&self, a: &CatalogScope, b: &CatalogScope) -> bool {
+        self.authority
+            .overlaps
+            .iter()
+            .any(|(x, y)| (x == a && y == b) || (x == b && y == a))
+    }
     pub fn scopes(&self) -> impl Iterator<Item = &CatalogScope> {
-        self.entries.iter().map(|e| &e.0)
+        self.authority.entries.iter().map(|e| &e.0)
     }
     pub fn scope_tag(&self, scope: &CatalogScope) -> Option<&str> {
-        self.entries
+        self.authority
+            .entries
             .iter()
             .find(|e| &e.0 == scope)
             .map(|e| e.1.as_str())
@@ -145,6 +178,7 @@ impl CatalogSnapshot {
 #[derive(Default)]
 pub struct CatalogBuilder {
     entries: Vec<(CatalogScope, String)>,
+    overlaps: Vec<(CatalogScope, CatalogScope)>,
 }
 impl CatalogBuilder {
     pub fn new() -> Self {
@@ -166,9 +200,27 @@ impl CatalogBuilder {
         self.entries.push((scope, scope_tag.into()));
         Ok(())
     }
+    /// Declare possible overlap between two already registered synthetic scopes.
+    pub fn declare_overlap(&mut self, a: &CatalogScope, b: &CatalogScope) -> Result<(), RefCode> {
+        if !self.entries.iter().any(|e| &e.0 == a) || !self.entries.iter().any(|e| &e.0 == b) {
+            return Err(RefCode::UnknownScope);
+        }
+        // At most 16 scopes: keep a bounded symmetric relation with no duplicates.
+        if !self
+            .overlaps
+            .iter()
+            .any(|(x, y)| (x == a && y == b) || (x == b && y == a))
+        {
+            self.overlaps.push((a.clone(), b.clone()));
+        }
+        Ok(())
+    }
     pub fn build(self) -> CatalogSnapshot {
         CatalogSnapshot {
-            entries: self.entries,
+            authority: Arc::new(CatalogAuthority {
+                entries: self.entries,
+                overlaps: self.overlaps,
+            }),
         }
     }
 }
@@ -189,6 +241,7 @@ impl FixtureRefIssuer {
     pub fn new(catalog: &CatalogSnapshot) -> Self {
         Self {
             registry: catalog
+                .authority
                 .entries
                 .iter()
                 .map(|(s, t)| Registry {

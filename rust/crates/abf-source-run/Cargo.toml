@@ -11,3 +11,4 @@ autobins = false
 [dependencies]
 abf-parser = { path = "../abf-parser", version = "=0.1.0" }
 abf-observation = { path = "../abf-observation", version = "=0.1.0" }
+abf-counting = { path = "../abf-counting", version = "=0.1.0" }
