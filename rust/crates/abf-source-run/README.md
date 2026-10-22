@@ -1,10 +1,10 @@
 # abf-source-run
 
-Bounded, synthetic-only G4B-1 evidence and G4B-2A admission companion to the
+Bounded, synthetic-only G4B-1 evidence and G4B-2 admission/paired projection companion to the
 accepted Agent Burn crates. This isolated unpublished Cargo workspace implements
 the V1.7 synthetic evidence and membership contract, with the two ABF107L
 acceptance errata and the gate-local ABF108D admission decisions below. It performs no I/O, collection, process execution, clock reads,
-network access, persistence or usage projection.
+network access or persistence. Numeric outputs are synthetic reported-claim projections, never usage.
 
 `CatalogBuilder` assigns unique catalog tags. `FixtureRefIssuer` creates fictional
 instances separately from listing their existing references. Labelled creation
@@ -136,10 +136,33 @@ unchecked conversion, and external compile-fail examples enforce validated-only
 construction. Empty memberships are valid when selected refs match; unknown,
 empty or unavailable inventories keep their original evidence and verdicts.
 
-Deliberately deferred to G4B-2B: adapter M1–M13, project_with_companion,
-PairedProjection, calls to abf_counting::project, G3B figures and adaptation
-conservation. The counting dependency supplies only its accepted Selection type;
-no projection is called. The existing crates remain independently usable.
+G4B-2B adds `project_with_companion(&membership)`. It builds exactly one G2A
+observation envelope and one G2B occurrence for each retained admitted record,
+without inspecting token values, model IDs, timestamps or hints for grouping.
+Records are canonical by member, source, source sequence and frame identity. Local
+occurrence handles are ordinal storage labels with no event-identity meaning.
+Each expected source contributes exactly one declaration, including zero-record
+and untraversed sources. Both carriers use the existing §7.2.1 reconciliation
+status unchanged. Scope-only states and second discoveries contribute no declaration.
+A single call to unchanged `abf_counting::project` uses `RunInventory::Declared`;
+the declared inventory remains non-exhaustive. The four historical crates stay
+independently usable, and raw G3B callers do not acquire companion guarantees.
+
+`PairedProjection` has private construction and holds the actual G3B result with
+the exact admitted member references, selection and selected refs. Its accessors
+are read-only. It borrows finalized members, independently of the lifetime of the
+membership handle. A failed admission cannot create a paired projection. Fixed
+adapter errors preserve observation, occurrence and projection error codes.
+
+`paired.assess(&diagnostics)` returns `PairedAssessment`, a read-only ordered list
+of the existing per-member `CurrentAssessment` views, aligned with `members()`.
+Supply one bound diagnostics snapshot per represented execution; one snapshot can
+serve multiple members of its execution. Missing, duplicate or unrelated snapshots
+return `IdentityMismatch`. Assessment accepts no view enums as evidence, delegates
+to the existing bound assessment, never edits values and defines no environment or
+Computer verdict roll-up. Each execution keeps its independent diagnostic ceiling.
+Empty membership with empty diagnostics yields an empty assessment list.
+
 Production readers, identity, clocks, filesystem and transport semantics remain
 unapproved. No runtime P-R/P-F modes or physical-event deduplication exist.
 

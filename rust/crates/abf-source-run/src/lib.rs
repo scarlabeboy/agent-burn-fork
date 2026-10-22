@@ -24,3 +24,5 @@ mod evidence;
 pub use evidence::DeliveryEvidence;
 mod membership;
 pub use membership::*;
+mod projection;
+pub use projection::*;

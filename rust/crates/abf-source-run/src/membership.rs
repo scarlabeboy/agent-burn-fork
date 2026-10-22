@@ -36,6 +36,9 @@ pub enum AdaptCode {
     SourceRefNamespaceConflict,
     OccurrenceCeiling,
     DeclarationCeiling,
+    Observation(abf_observation::AdapterCode),
+    Occurrence(abf_identity_relations::Code),
+    Projection(abf_counting::Code),
 }
 
 /// Admission only: immutable borrowed finalizations in canonical order.
