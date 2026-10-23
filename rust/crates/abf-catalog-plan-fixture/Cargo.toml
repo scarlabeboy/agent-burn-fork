@@ -1,0 +1,16 @@
+[package]
+name = "abf-catalog-plan-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = false
+autobins = false
+
+[workspace]
+
+[dependencies]
+abf-source-run = { path = "../abf-source-run", version = "=0.1.0" }
+
+[dev-dependencies]
+abf-reader-fixture = { path = "../abf-reader-fixture", version = "=0.1.0" }
+abf-counting = { path = "../abf-counting", version = "=0.1.0" }
