@@ -1,88 +1,88 @@
-# Agent Burn Fork (ABF) — Instructions for coding agents
+# Agent Burn Fork (ABF) - Instructions for coding agents - V2.0
 
-**Status:** standing repository instructions for coding agents. Read this file before any operation. It grants **no permission by itself** to inspect sensitive data, execute tests, modify code, or mutate Git. The current gate prompt defines the exact allowed scope.
+**Standing repository instructions.** This file does not itself authorize reading sensitive data, executing tests, modifying code, creating artifacts, or mutating Git. The intervention prompt establishes the exact permitted scope. Follow applicable nested `AGENTS.md` instructions too; stop on a material conflict rather than silently overriding a security boundary.
 
 ## Project intent
 
-- Build a reliable **Windows 10/11 x64** Tauri v2 desktop application, using Agent Burn's Rust engine and selectively adapting the existing Windows port.
-- Support **Windows alone**, **Ubuntu WSL2 alone (controlled from Windows)**, and **both**; one computer, one selected WSL distro.
-- `Computer` is a deduplicated aggregate **view**, never a third collection source. Keep environment and harness filters consistent across reports, models, charts and projects.
-- Preserve the current Agent Burn experience where practicable. Prefer correctness, reproducibility, data safety and maintainability to adding features.
-- Engine heritage includes `ccusage/ccusage`. The Git upstream baseline is `Melvynx/agent-burn`; `DavidSZD/agent-burn` is a separate Windows-port reference, not an automatic Git ancestor or synchronization source. Audit reused code. Never synchronize upstream automatically.
-- Detailed product decisions live in the ABF project handoff/specifications. Do not invent or silently freeze open architectural choices.
+- Build a reliable native Windows 10/11 x64 application with Tauri v2 and Agent Burn's Rust engine. Selectively audit and adapt the separate DavidSZD Windows port; it is not an automatic Git ancestor.
+- Support Windows-only collection, one selected Ubuntu WSL2 distribution supervised by Windows, and Windows + WSL. `Computer` is an aggregate view, never an independent collection source. Windows-only mode must not start WSL or contact its namespace.
+- Preserve Agent Burn's useful experience where practicable. Prioritize correctness, provenance, privacy, reproducibility, maintainability, and practical incremental delivery.
+- Upstream baseline: `Melvynx/agent-burn`. Engine heritage includes `ccusage/ccusage`. Never synchronize upstream automatically or edit the historical working installation.
+- Product decisions and open contracts are in ABF project specifications and approved handoffs. Do not silently invent or adopt unresolved architecture.
 
-## Authority and work scope
+## Authority and intervention boundaries
 
-- The **user** approves architecture, sensitive operations, manual Git staging, commit/push/merge/release/deployment.
-- **ChatGPT** orchestrates gates, prompts, evidence review and independent audits in normal chat.
-- You execute **only the explicitly authorized gate**. No implicit next gate, opportunistic refactor, unauthorized subagent or scope expansion.
-- Respect per-gate read/write/execute/network/WSL allowlists. If missing, treat the capability as **not authorized**.
-- On unexpected baseline, unclear identity, sensitive access, protected-file modification or out-of-scope dependency: **STOP**, report what was found, and request renewed scope. Do not fix by improvisation.
+- The **user** approves sensitive permissions, structural contracts, publication, release, deployment, staging, commits, pushes, merges, and branch/ref changes.
+- **ChatGPT** orchestrates missions, tool choice, prompts, evidence review and independent audits. Its proposal of the next prompt is not authorization for this agent to run another intervention.
+- Execute **only the intervention explicitly delivered**. Read/write/execute/network/WSL/process permissions, fixture roots and temporary outputs must be granted for this intervention. Missing permissions mean not authorized.
+- No unapproved subagents, opportunistic edits, access expansions, repairs of unexpected baseline, or implicit future gates.
+- On unexpected Git identity or status, missing evidence, protected path, risky side effect, unclear permission or conflicting authority: **STOP**, report the issue, do not improvise.
 
-## Git — strict no-mutation policy
+## Git - strict no-mutation policy
 
-**Agents must not execute Git mutations or publication actions, even when technically possible.** Forbidden without exception for agents:
+Agents **never** stage, commit, push, merge, rebase, reset, restore, checkout, switch, cherry-pick, stash, change branches/tags/refs, or perform `git fetch`/`git pull` that change local state. This includes indirect IDE, script, API or subagent actions. Even an otherwise authorized implementation gate does not grant these rights.
 
-- `git add` (including `-N`), `commit`, `push`, `reset`, `restore`, `checkout`, `switch`, `merge`, `rebase`, `cherry-pick`, `stash`;
-- branch/tag/reference creation, update or deletion, and `git fetch`/`git pull` that change local repository state;
-- equivalent IDE, script, GitHub API or subagent actions.
+Read-only Git checks require the intervention scope: `git status`, `git diff`, `git diff --cached`, `git log`, `git show`, `git rev-parse`, `git ls-files`, `git diff --check`, and similar checks. Verify branch, full HEAD, staged, unstaged, deleted/renamed, and untracked paths; plain `git diff` does not include new untracked files.
 
-Read-only checks such as `git status`, `git diff`, `git diff --cached`, `git log`, `git show`, `git rev-parse`, `git ls-files` and `git diff --check` require gate authorization. Check **tracked, untracked, staged and deleted** files; `git diff` alone misses new untracked files.
+A **deliberately pre-staged baseline** may be present when the user prepared a Patchr correction. If the prompt identifies this condition, treat it as expected and compare the new unstaged changes plus untracked files against the staged baseline. Never stage them yourself.
 
-The user stages selected files **manually, through VS Code or reviewed shell commands**, then executes reviewed commit/push commands. An audit PASS does not authorize publication.
+Only the user performs Git mutations with reviewed commands. A successful test or audit never grants commit or publication authority.
 
-## Protect the existing working installation
+## Protect the existing installation and data
 
-**Never modify, clean, overwrite, uninstall or migrate** the currently used Agent Burn Windows app, its `%LOCALAPPDATA%\Agent Burn` data, autostart, updater, settings or caches; the WSL CLI; the historical `~/Tools/agent-burn` checkout and `fix/pricing-cache-race` branch; or real provider/tool histories. These are protected unless the user grants a separate, narrow authorization.
+**Do not modify, clean, overwrite, uninstall, migrate or inspect without specific scope:**
 
-- Create all future ABF application identifiers, executables, profiles, caches, update channels and data directories **independently**. Test coexistence explicitly.
-- Never alter real Claude Code/Codex/OpenCode logs, tokens, credentials, OAuth files, provider billing information or pricing caches during tests.
-- Use synthetic fixtures or explicitly approved isolated copies. Be mindful that even a "read" can spawn `wsl.exe`, start Ubuntu, query an API, or refresh credentials.
-- No unauthorized installers, downloads, package updates, network requests, registry edits, tasks or process changes.
+- The productive Agent Burn Windows app, its `%LOCALAPPDATA%\Agent Burn` profile, updater, settings, autostart, registry integration or caches.
+- The old WSL CLI and `~/Tools/agent-burn` repository, including `fix/pricing-cache-race`.
+- Real Claude Code, Codex and OpenCode histories/logs, credentials, OAuth tokens, subscriptions, quota data, provider billing or pricing caches.
+- Host or guest systems, unrelated repositories, user backups, installation folders and external services.
 
-## Data-correctness invariants
+The fork must have independent app/Tauri identity, executable, data folders, shortcuts, autostart, updater and release channel. Use synthetic fixtures or explicitly admitted isolated copies. A seemingly read-only action can spawn `wsl.exe`, start a distribution, contact a network/API, or refresh credentials. None is implicitly authorized. No unapproved installs, downloads, updates, registry edits or process changes.
 
-1. **Preserve provenance:** machine/environment, harness, session, event/record identity, source file and capture time where available.
-2. **Deduplicate cautiously:** equal timestamps/models/token totals do **not** prove event identity. Do not collapse distinct events or assert exact deduplication from pre-aggregated reports.
-3. **Separate identities:** accounts and quotas are provider/account scoped, **not environment scoped**. Never sum the same account's quota twice; never merge unverified accounts.
-4. **Distinguish money concepts:** observed tokens, estimated API cost, verified billed cost and subscription-equivalent value are different. Show tariff provenance/version and classification assumptions.
-5. **Preserve history:** failed or disabled collection, unavailable WSL/API, timeout, corrupt cache, restart or update must not silently replace reliable historical data with zero. Track freshness/status explicitly.
-6. **Determinism:** identical normalized inputs and rules should produce reproducible environment and Computer views. Version schemas and migration logic.
-7. **Scale:** pursue incremental scans and bounded memory without losing data after log rotation, rewrite or archival; benchmark rather than assume.
-8. **Privacy:** local-first. Never emit prompts, tokens, private logs or secrets into repository, reports, telemetry or external services.
+## Data correctness invariants
 
-**Approved relevant decisions:** D15 K7 uses ACL-protected plaintext SQLite for V1, not the DPAPI-based K2 architecture. Windows and WSL are distinct collection environments, `Computer` is a computed union view, and WSL must never be started automatically without explicit authorization.
+1. **Provenance:** retain machine/environment, harness, source, event/record/session, attempt and acquisition identity when available. Do not invent proof of physical provenance from a synthetic label.
+2. **Deduplication:** matching timestamps, model names, text or token totals do not prove identity. Deduplicate only with justified event-level evidence, before aggregation.
+3. **Accounts:** quotas and limits belong to provider accounts, not environments. Do not double-count the same account or merge unverified account identities.
+4. **Costs:** separate observed tokens, estimated API cost, confirmed billed cost and subscription-equivalent value; record tariff assumptions and version when applicable.
+5. **Resilience:** unavailable or failed collection, restart, corrupt cache or timeout must not silently turn known historical values into zero. Mark freshness and availability.
+6. **Determinism:** equal normalized inputs and rules produce reproducible environment and `Computer` projections; version relevant schemas and migrations.
+7. **Scale:** pursue incremental scans and bounded memory without losing information through log rewrites, rotation or archival; measure rather than assume.
+8. **Privacy:** local-first; no private prompts, secrets, histories or credentials in code, fixture output, reports, logs, telemetry or external systems.
 
-**Still subject to separate approval:** detailed event and persistence schemas, unresolved cross-environment identity rules, CLI bridge design and other proposed architecture contracts. Do not present design candidates as accepted decisions.
+**Approved decision:** D15 K7 uses ACL-protected plaintext SQLite in V1, not DPAPI K2. Windows and WSL are separate environments and `Computer` is a computed union view. WSL is not launched without explicit permission.
 
-## Engineering practices
+**Not automatically approved:** final event/persistence schemas, cross-environment identities, CLI bridge, native reader authority, migrations or other open production contracts. Do not present proposals as accepted decisions.
 
-- Verify repository, branch, exact HEAD, relevant hashes and current worktree state **before** a gate affecting code; do not reset or repair differences.
-- Prefer minimal, targeted changes; respect adapter boundaries and minimize edits to upstream parsers.
-- Read the nearest package-specific `AGENTS.md` before editing package code. Root ABF safety rules and the current gate always take precedence over conflicting inherited instructions.
-- Consult relevant repository-local skills when useful and authorized, but never treat a skill as permission to activate direnv/Nix, install tools, run scripts, create PRs, mutate Git or access real data.
-- Keep Rust modules focused and internal APIs narrow; prefer synthetic fixture-backed parser and loader tests.
-- For user-facing changes, review the impact on README files, documentation, navigation and examples. Modify documentation only within the authorized gate.
-- Use US English for repository-facing GitHub issues, PRs and review comments unless the user specifies otherwise.
-- Keep collection, normalization, aggregation, quotas, pricing, persistence, Tauri commands and UI responsibilities explicit.
-- Validate all Windows/WSL path and process arguments. Document provider network calls, credential reads and side effects.
-- Preserve backward compatibility only where required by approved contracts; do not invent a migration from the production installation.
-- Run **only** gate-authorized tests, builds and commands; consider their output directories and cache side effects. Never claim PASS for unexecuted tests.
-- Prefer independent expected outcomes, adversarial cases (copied sessions, token collisions, offline sources, concurrent writes, interrupted persistence) and negative-path tests.
-- Independent auditors work read-only on source by default; write reports and authorized test artifacts outside the project, never fix the audited code.
-- Environment-dependent tests are representative only if their execution environment has been verified for the property under test. A sandbox result does not automatically prove native Windows/WSL filesystem, permissions, mount, or kernel behavior. Report unavailable or nonrepresentative tests; never bypass isolation.
-- Required validations follow the gate's risks and affected invariants. Investigate failures, contradictions, and new risks, but avoid repeating equivalent checks without new evidentiary value. Never sacrifice required validation for time or tokens.
-- Use deterministic checks for repository identity, file inventories, hashes, command results, and test counts. Reuse verified unchanged evidence when applicable, while independently examining affected code and invariants.
+## Windows confinement boundary
 
-## Conversation, reports and completion
+B1/S1-S3 are synthetic research; the B1/S3 Rust fixture has no validated native Windows confinement. ABF120-F01 and F02 remain blockers and F03 remains a prerequisite, unless a later explicit decision closes them with evidence.
 
-- **Intervention IDs, independent of conversations:** Each logical gate starts with a unique integer ID (`ABF55`). Subsequent interventions within that gate receive unique, increasing suffixes (`ABF55B`, `ABF55C`, `ABF55D`...), whether performed in a NEW or RESUMED conversation. The first intervention has no `A` suffix. Never reuse an intervention ID or retroactively rename historical interventions. The current gate prompt supplies the exact authorized intervention ID.
-- **NEW versus RESUME:** Conversation choice does not determine intervention numbering. An independent audit normally uses a new conversation, but may retain the same gate integer with a new suffix when reviewing that gate. A genuinely distinct logical gate receives the next available integer. Opening a new conversation alone never creates a new gate.
-- **Unique and immutable transfer ZIPs:** When explicitly authorized by the gate prompt, create one transfer ZIP with the intervention's unique ID and exact designated path, normally at the root of `/tmp`. Finalize and verify its contents before safely publishing the complete archive without overwriting any existing file. Never modify, replace, regenerate at the same path, rename, or delete a published ZIP. Corrections require a new intervention ID and a separately authorized ZIP path. Agents must not access the Windows D: backup or operate SyncBack without separate explicit authorization.
-- Gates (`A0`, `A1`, `A2`, `B1`, ...) are **separate** from intervention IDs and conversation sessions.
-- Standard non-persistent reports belong in an authorized, isolated temporary directory such as `/tmp/abf1-a0-audit/` **in the running environment**. Do not assume Windows and WSL share `/tmp`.
-- Reporting is proportional to the gate. Preserve: verified baseline, inspected/edited paths, material commands and exit codes, actual tests versus `NOT_RUN`, findings, relevant protected-state checks, evidence references, limitations, and exactly **one** proposed next action (not started). Avoid duplicating unchanged logs and creating unnecessary reports.
-- Finding severities: `BLOCKER`, `MAJOR`, `MINOR`. Audit verdict: `PASS`, `PASS_WITH_FINDINGS`, `HOLD`. Use `FINDINGS` only when a particular audit contract explicitly defines that legacy label. A PASS applies only to the checked scope.
-- The orchestrator chooses NEW or RESUME for corrections from technical continuity, remaining context, known compactions, previous resumptions, risk, and evidence. Independent audits remain separate from author corrections, immutable, and are repeated as warranted.
+- **Contract A:** continuous membership of files under their authorized root throughout the operation is the reference requirement for native reads. If not established, refuse those reads.
+- **Contract B:** authority established at one checked instant and reuse of the same object is a separate research hypothesis, not production authorization and not a substitute for A.
+- Windows Sandbox is a possible **guest-only, non-representative research environment**, not an attested storage/host security boundary. No W1-W7 native witness is authorized by the sandbox's mere availability.
 
-**Implementation status:** never infer current HEAD, completed gates, accepted findings, or production readiness from this file. Verify current repository state and the applicable approved contracts. Synthetic research does not authorize production collection, real-history access, or production reuse; these remain **BLOCKED** without separate authorization and required security review. No future gate is implicitly authorized.
+## Engineering, tests and review
+
+- Verify repo, branch, full HEAD, worktree/index/untracked state, input hashes and candidate identity as relevant before code-affecting work. Never reset or repair a divergence.
+- Prefer minimal cohesive changes that deliver useful functionality. Maintain explicit boundaries among collection, normalization, aggregation, persistence, quotas, pricing, Tauri commands and UI. Minimize unneeded edits to upstream parsers.
+- Read applicable package-level `AGENTS.md` before editing its code. Repository-local skills are guidance, not permission to install tools, run unapproved processes or change Git.
+- Use focused Rust modules, narrow interfaces and independent expected outcomes. Prefer synthetic fixture-backed tests for loaders and parsers; cover meaningful negative paths.
+- Run **only authorized** tests/builds/commands, mindful of caches and output paths. Separate actually run tests from `NOT_RUN`, including non-representative Windows/WSL native checks. Do not bypass isolation to claim PASS.
+- Validate Windows/WSL paths and process arguments; document side effects and network/credential accesses. Preserve backward compatibility only where contracts require it.
+- For UI or documents, check relevant README, navigation and examples, but edit only authorized paths. Use US English for repository-facing issues, PR comments and reviews unless explicitly directed otherwise.
+- Reuse existing still-valid tests and audit evidence. Use mechanical SHA, file inventory and counts for deterministic checks. Analyze new/affected logic; do not repeat large campaigns without a new safety or correctness question.
+- Match verification depth to risk: ordinary changes get relevant tests; important changes receive focused review when appropriate; critical security/integrity changes require deeper independent scrutiny. Do not weaken essential checks for time or token savings.
+- Independent auditors do not fix the code being audited. They work read-only on the candidate and write only authorized reports/artifacts outside the repository.
+- **Typography:** use only the ASCII hyphen-minus `-` in authored UI strings, prose, reports, comments and prompts. Do not rewrite technical syntax, literal third-party data or exact quotations just to meet this style preference.
+
+## Intervention IDs, reports and transfer archives
+
+- A logical mission starts at `ABF55`; later interventions use `ABF55B`, `ABF55C`, ... `ABF55Z`, across agents and NEW/RESUME sessions. No initial A suffix. Never reuse or retroactively rename an ID. After Z, the orchestrator assigns a free new integer with explicit continuation reference; do not do so independently.
+- Conversation names and intervention IDs are different. Follow the **intervention ID in the delivered prompt** when labeling reports and artifacts.
+- Reports are proportional: candidate and HEAD, inspected/edited paths, relevant commands/results, `RUN`/`NOT_RUN`, findings, scope limits, evidence and one recommended next action **not executed**. Verdicts: `PASS`, `PASS_WITH_FINDINGS`, `HOLD`; severity: `BLOCKER`, `MAJOR`, `MINOR`.
+- Write reports only in specifically permitted isolated temporary paths. `/tmp` WSL is volatile and separate from Windows temp paths. Do not assume persisted history or backups.
+- If a ZIP transfer is explicitly required, use the **single exact unique final `/tmp` path** authorized for that intervention. Finalize and verify selected files/manifest, hashes, ZIP members and CRC before publishing safely without replacing an existing file. A published ZIP is immutable; no overwriting, deletion, renaming or regeneration at that path. A correction gets its own ID/path.
+- **SyncBack and D:** belong to the user. Do not read/write D:, control SyncBack, or search backups. If a required ZIP is absent from permitted `/tmp`, report its absence instead of restoring it.
+
+**Completion rule:** report only what was actually proved in the permitted scope. A passed synthetic test does not authorize production access. Never start a subsequent gate merely because it is logically next.
