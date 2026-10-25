@@ -9,8 +9,8 @@
 //! These checks are path-based and **not race-free**. A concurrent swap of
 //! the root, an intermediate directory or the final file between a check and
 //! the following use can make the boundary read outside data and emit it.
-//! Production reuse is blocked until handle-relative containment is
-//! implemented, tested and reviewed.
+//! Production reuse remains blocked pending the prerequisites in the README.
+//! Contract A V2 does not require absolute containment against concurrent swaps.
 
 use std::{
     fs, io,
@@ -263,7 +263,7 @@ impl AuthorizedRoot {
 
 fn check_root_directory(path: &Path) -> Result<FileObjectRef, RootRejection> {
     let metadata = fs::symlink_metadata(path).map_err(|e| RootRejection::Io(e.kind()))?;
-    if metadata.file_type().is_symlink() {
+    if is_redirection(&metadata) {
         return Err(RootRejection::Symlink);
     }
     if !metadata.is_dir() {
@@ -299,10 +299,10 @@ pub const MAX_DEPTH_CEILING: usize = 64;
 /// [`CollectionScope::with_limits`] rejects anything else.
 ///
 /// These bound directory iteration and each individual input file. They are
-/// not a budget for retained output: one file can yield one record per line,
-/// each carrying cloned provenance, and every file report of a batch is
-/// retained. Memory can therefore far exceed `max_file_bytes`. Use small,
-/// trusted synthetic fixtures only.
+/// not a byte budget for retained output: each record carries cloned
+/// provenance and every file report is retained. Synthetic collection also
+/// caps retained record outcomes at 4096 per call. Memory can still exceed
+/// `max_file_bytes`. Use small, trusted synthetic fixtures only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CollectionLimits {
     /// Per-file input size limit; not a batch memory budget.
@@ -410,7 +410,7 @@ impl CollectionScope {
         for directory in directories {
             path.push(directory);
             let metadata = fs::symlink_metadata(&path).map_err(|e| PathRejection::Io(e.kind()))?;
-            if metadata.file_type().is_symlink() {
+            if is_redirection(&metadata) {
                 return Err(PathRejection::SymlinkComponent);
             }
             if !metadata.is_dir() {
@@ -419,7 +419,7 @@ impl CollectionScope {
         }
         path.push(last);
         let metadata = fs::symlink_metadata(&path).map_err(|e| PathRejection::Io(e.kind()))?;
-        if metadata.file_type().is_symlink() {
+        if is_redirection(&metadata) {
             return Err(PathRejection::Symlink);
         }
         if !metadata.is_file() {
@@ -433,6 +433,9 @@ impl CollectionScope {
             relative: relative.to_owned(),
             object: file_object(&metadata),
             len: metadata.len(),
+            modified: metadata
+                .modified()
+                .map_err(|e| PathRejection::Io(e.kind()))?,
         })
     }
 
@@ -483,23 +486,23 @@ impl CollectionScope {
                 } else {
                     format!("{prefix}/{name}")
                 };
-                // `DirEntry::file_type` does not follow symbolic links.
-                let file_type = match entry.file_type() {
-                    Ok(file_type) => file_type,
+                // Check all detectable redirections, including Windows reparse points.
+                let metadata = match fs::symlink_metadata(entry.path()) {
+                    Ok(metadata) => metadata,
                     Err(error) => {
                         enumeration.skip(Some(relative), SkipReason::Io(error.kind()));
                         continue;
                     }
                 };
-                if file_type.is_symlink() {
+                if is_redirection(&metadata) {
                     enumeration.skip(Some(relative), SkipReason::Symlink);
-                } else if file_type.is_dir() {
+                } else if metadata.is_dir() {
                     if depth + 2 > self.limits.max_depth {
                         enumeration.skip(Some(relative), SkipReason::DepthLimit);
                     } else {
                         pending.push((entry.path(), relative, depth + 1));
                     }
-                } else if !file_type.is_file() {
+                } else if !metadata.is_file() {
                     enumeration.skip(Some(relative), SkipReason::NotRegularFile);
                 } else if has_fixture_extension(name) {
                     enumeration.candidates.push(relative);
@@ -526,6 +529,7 @@ pub(crate) struct ResolvedFile {
     pub(crate) relative: String,
     pub(crate) object: FileObjectRef,
     pub(crate) len: u64,
+    pub(crate) modified: std::time::SystemTime,
 }
 
 /// Pulls items while `budget` lasts, decrementing it per item. Returns `None`
@@ -621,6 +625,21 @@ pub(crate) fn hard_link_count(metadata: &fs::Metadata) -> u64 {
 #[cfg(not(unix))]
 pub(crate) fn hard_link_count(_metadata: &fs::Metadata) -> u64 {
     1
+}
+
+/// Conservative Windows safeguard: refuse every detected reparse point,
+/// including junctions. This is a path-time check, not an atomic no-follow open.
+pub(crate) fn is_redirection(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
 #[cfg(test)]

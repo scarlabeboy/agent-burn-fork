@@ -28,9 +28,10 @@
 //!
 //! For small, stable, trusted synthetic fixtures only.
 //! - **Containment** is path-based and not race-free.
-//! - **Reads** are not a coherent snapshot: growth before `open` and
-//!   same-size rewrites are not detected.
-//! - **Memory:** there is no output memory budget.
+//! - **Reads** compare identity, length and modification time, but are not a
+//!   coherent snapshot; rewrites preserving metadata can escape detection.
+//! - **Memory:** at most 4096 record outcomes per call; input and directory
+//!   limits still need to be kept small for these disposable fixtures.
 //! - **Privacy:** allowlisted values can still be sensitive.
 //!
 //! See the crate README.
@@ -48,6 +49,10 @@ use crate::scope::{CollectionScope, PathRejection, ResolvedFile, file_object, ha
 pub const FIXTURE_FORMAT_VERSION: u32 = 1;
 pub const FIXTURE_HEADER: &str = "abf-synthetic-fixture/1";
 pub const FIXTURE_EXTENSION: &str = ".abf-fixture";
+
+/// Maximum retained record outcomes per single-file call or entire root call.
+/// Includes rejected records; exhaustion rejects the whole affected file.
+pub const MAX_RECORD_OUTCOMES: usize = 4096;
 
 const MAX_IDENTIFIER_LEN: usize = 128;
 const MAX_EVENT_TIME_LEN: usize = 40;
@@ -172,6 +177,16 @@ pub fn collect_synthetic_file(
     run: &ScanRun,
     relative_path: &str,
 ) -> Result<FileReport, PathRejection> {
+    let mut remaining_records = MAX_RECORD_OUTCOMES;
+    collect_file_with_budget(scope, run, relative_path, &mut remaining_records)
+}
+
+fn collect_file_with_budget(
+    scope: &CollectionScope,
+    run: &ScanRun,
+    relative_path: &str,
+    remaining_records: &mut usize,
+) -> Result<FileReport, PathRejection> {
     let revalidate = || {
         scope
             .root()
@@ -180,7 +195,7 @@ pub fn collect_synthetic_file(
     };
     revalidate()?;
     let resolved = scope.resolve_regular_file(relative_path)?;
-    let report = read_fixture(scope, run, &resolved);
+    let report = read_fixture(scope, run, &resolved, remaining_records);
     revalidate()?;
     Ok(report)
 }
@@ -199,8 +214,9 @@ pub fn collect_synthetic_root(
     let enumeration = scope.enumerate()?;
     let mut skipped = enumeration.skipped;
     let mut files = Vec::with_capacity(enumeration.candidates.len());
+    let mut remaining_records = MAX_RECORD_OUTCOMES;
     for relative in enumeration.candidates {
-        match collect_synthetic_file(scope, run, &relative) {
+        match collect_file_with_budget(scope, run, &relative, &mut remaining_records) {
             Ok(report) => files.push(report),
             Err(PathRejection::RootChanged(rejection)) => {
                 return Err(CollectError::RootChanged(rejection));
@@ -231,7 +247,12 @@ pub fn collect_synthetic_root(
     })
 }
 
-fn read_fixture(scope: &CollectionScope, run: &ScanRun, resolved: &ResolvedFile) -> FileReport {
+fn read_fixture(
+    scope: &CollectionScope,
+    run: &ScanRun,
+    resolved: &ResolvedFile,
+    remaining_records: &mut usize,
+) -> FileReport {
     let mut report = FileReport {
         relative_path: resolved.relative.clone(),
         file_object: resolved.object,
@@ -240,7 +261,23 @@ fn read_fixture(scope: &CollectionScope, run: &ScanRun, resolved: &ResolvedFile)
         pending_tail_bytes: 0,
     };
     match read_bounded(resolved, scope.limits().max_file_bytes) {
-        Ok(bytes) => parse_records(&bytes, scope, run, &mut report),
+        Ok(bytes) => {
+            let Some(body) = bytes.get(FIXTURE_HEADER.len() + 1..) else {
+                report.status = FileStatus::Rejected(FileRejection::NotSyntheticFixture);
+                return report;
+            };
+            let records = body
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .take(*remaining_records + 1)
+                .count();
+            if records > *remaining_records {
+                report.status = FileStatus::Rejected(FileRejection::OutputLimit);
+            } else {
+                *remaining_records -= records;
+                parse_records(&bytes, scope, run, &mut report);
+            }
+        }
         Err(rejection) => report.status = FileStatus::Rejected(rejection),
     }
     report
@@ -248,12 +285,16 @@ fn read_fixture(scope: &CollectionScope, run: &ScanRun, resolved: &ResolvedFile)
 
 fn read_bounded(resolved: &ResolvedFile, max_bytes: u64) -> Result<Vec<u8>, FileRejection> {
     let io = |error: std::io::Error| FileRejection::Io(error.kind());
-    if resolved.len > max_bytes {
+    if resolved.len > max_bytes || max_bytes < (FIXTURE_HEADER.len() + 1) as u64 {
         return Err(FileRejection::TooLarge);
     }
     let mut file = File::open(&resolved.path).map_err(io)?;
     let before = file.metadata().map_err(io)?;
-    if !before.is_file() || file_object(&before) != resolved.object {
+    if !before.is_file()
+        || file_object(&before) != resolved.object
+        || before.len() != resolved.len
+        || before.modified().map_err(io)? != resolved.modified
+    {
         return Err(FileRejection::ChangedDuringRead);
     }
     if hard_link_count(&before) > 1 {
@@ -287,6 +328,7 @@ fn read_bounded(resolved: &ResolvedFile, max_bytes: u64) -> Result<Vec<u8>, File
     let after = file.metadata().map_err(io)?;
     if file_object(&after) != resolved.object
         || after.len() != before.len()
+        || after.modified().map_err(io)? != resolved.modified
         || bytes.len() as u64 != before.len()
     {
         return Err(FileRejection::ChangedDuringRead);
@@ -486,3 +528,6 @@ fn count_field(value: Option<&str>) -> Field<u64> {
         },
     }
 }
+
+#[cfg(test)]
+mod tests;

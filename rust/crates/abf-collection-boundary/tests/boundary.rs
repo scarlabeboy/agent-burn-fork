@@ -1117,3 +1117,139 @@ fn restored_root_object_is_accepted_again() {
     assert_eq!(batch.observations().count(), 1);
     assert_eq!(batch.completeness, Completeness::Complete);
 }
+
+#[test]
+fn record_output_is_bounded_across_files_without_successful_truncation() {
+    let root = TempDir::new("output");
+    root.write("a.abf-fixture", fixture(&vec!["input_tokens=1"; 4096]));
+    root.write("b.abf-fixture", fixture(&["input_tokens=2"]));
+    root.write("c.abf-fixture", fixture(&[]));
+    let batch = collect(&scope(wsl_env(), claude_source(), &root.path), "run-budget");
+    assert_eq!(batch.files[0].status, FileStatus::Read);
+    assert_eq!(batch.files[0].records.len(), 4096);
+    assert_eq!(
+        batch.files[1].status,
+        FileStatus::Rejected(FileRejection::OutputLimit)
+    );
+    assert!(batch.files[1].records.is_empty());
+    assert_eq!(batch.files[2].status, FileStatus::Read);
+    assert!(batch.files[2].records.is_empty());
+    assert_eq!(batch.completeness, Completeness::Incomplete);
+}
+
+#[test]
+fn oversized_record_output_rejects_whole_file() {
+    let root = TempDir::new("output-single");
+    root.write("a.abf-fixture", fixture(&vec![""; 4097]));
+    let report = collect_synthetic_file(
+        &scope(wsl_env(), claude_source(), &root.path),
+        &run("run-budget"),
+        "a.abf-fixture",
+    )
+    .unwrap();
+    assert_eq!(
+        report.status,
+        FileStatus::Rejected(FileRejection::OutputLimit)
+    );
+    assert!(report.records.is_empty());
+}
+
+#[test]
+fn missing_file_is_not_an_empty_success() {
+    let root = TempDir::new("missing");
+    let result = collect_synthetic_file(
+        &scope(wsl_env(), claude_source(), &root.path),
+        &run("run-missing"),
+        "missing.abf-fixture",
+    );
+    assert_eq!(result, Err(PathRejection::Io(std::io::ErrorKind::NotFound)));
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_file_is_a_failure_alongside_readable_results() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new("unreadable");
+    root.write("a.abf-fixture", fixture(&["input_tokens=7"]));
+    let unreadable = root.write("b.abf-fixture", fixture(&["input_tokens=99"]));
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+    let batch = collect(
+        &scope(wsl_env(), claude_source(), &root.path),
+        "run-unreadable",
+    );
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(batch.files[0].status, FileStatus::Read);
+    assert_eq!(
+        batch.files[1].status,
+        FileStatus::Rejected(FileRejection::Io(std::io::ErrorKind::PermissionDenied))
+    );
+    assert!(batch.files[1].records.is_empty());
+    assert_eq!(batch.observations().count(), 1);
+    assert_eq!(batch.completeness, Completeness::Incomplete);
+}
+
+#[test]
+fn empty_short_and_truncated_headers_are_coded_rejections() {
+    let root = TempDir::new("truncated-header");
+    let scope = scope(wsl_env(), claude_source(), &root.path);
+    let run = run("run-truncated");
+    for length in 0..FIXTURE_HEADER.len() {
+        root.write(
+            "truncated.abf-fixture",
+            &FIXTURE_HEADER.as_bytes()[..length],
+        );
+        let report = collect_synthetic_file(&scope, &run, "truncated.abf-fixture").unwrap();
+        assert_eq!(
+            report.status,
+            FileStatus::Rejected(FileRejection::NotSyntheticFixture),
+            "prefix length {length}"
+        );
+        assert!(report.records.is_empty());
+        assert_eq!(report.pending_tail_bytes, 0);
+    }
+    let batch = collect_synthetic_root(&scope, &run).unwrap();
+    assert_eq!(batch.completeness, Completeness::Incomplete);
+    assert_eq!(batch.observations().count(), 0);
+}
+
+#[test]
+fn exact_header_without_separator_is_a_coded_rejection() {
+    let root = TempDir::new("header-boundary");
+    root.write("header.abf-fixture", FIXTURE_HEADER);
+    let report = collect_synthetic_file(
+        &scope(wsl_env(), claude_source(), &root.path),
+        &run("run-header"),
+        "header.abf-fixture",
+    )
+    .unwrap();
+    assert_eq!(
+        report.status,
+        FileStatus::Rejected(FileRejection::NotSyntheticFixture)
+    );
+    assert!(report.records.is_empty());
+    assert_eq!(report.pending_tail_bytes, 0);
+}
+
+#[test]
+fn header_plus_separator_requires_a_newline_and_emits_no_records() {
+    let root = TempDir::new("separator-boundary");
+    let scope = scope(wsl_env(), claude_source(), &root.path);
+    let run = run("run-separator");
+    for (separator, status) in [
+        ('\n', FileStatus::Read),
+        (
+            'x',
+            FileStatus::Rejected(FileRejection::NotSyntheticFixture),
+        ),
+        (
+            '\r',
+            FileStatus::Rejected(FileRejection::NotSyntheticFixture),
+        ),
+    ] {
+        root.write("header.abf-fixture", format!("{FIXTURE_HEADER}{separator}"));
+        let report = collect_synthetic_file(&scope, &run, "header.abf-fixture").unwrap();
+        assert_eq!(report.status, status);
+        assert!(report.records.is_empty());
+        assert_eq!(report.pending_tail_bytes, 0);
+    }
+}

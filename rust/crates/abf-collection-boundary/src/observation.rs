@@ -239,16 +239,17 @@ pub enum FileRejection {
     Path(PathRejection),
     NotSyntheticFixture,
     TooLarge,
+    /// Retained record budget exhausted; nothing from this file is emitted.
+    OutputLimit,
     /// A limited read-change check failed:
     /// - the opened handle was not a regular file;
     /// - on Unix only, its file identity differed from the resolved one;
-    /// - its identity or length changed between `open` and the end of the
-    ///   read;
+    /// - its length or modification time changed from resolution through
+    ///   `open` to the end of the read;
     /// - the bytes read did not equal the length at `open`.
     ///
     /// Nothing from the file is emitted. This is not a coherent snapshot:
-    /// growth between resolution and `open` and same-size rewrites are not
-    /// detected.
+    /// rewrites preserving the checked metadata are not detected.
     ChangedDuringRead,
     Io(io::ErrorKind),
 }

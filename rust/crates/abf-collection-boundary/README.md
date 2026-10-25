@@ -23,7 +23,7 @@ separately reviewed. Under Contract A V2 (AGENTS.md) handle-relative
 containment is no longer an absolute prerequisite, but the link/reparse
 no-follow policy, read-coherence behavior and documented residual limits must
 be implemented and tested for the mechanisms actually used. Further production
-prerequisites: practical output memory budgets, a read-coherence strategy and
+prerequisites: a practical total memory budget, a reviewed read-coherence strategy and
 an export/redaction policy. This note grants no production access.
 
 ## Build isolation
@@ -92,9 +92,10 @@ what they do not guarantee.
 - **Path checks against escaping the root** (path-based, not race-free):
   - relative paths with `..`, `.`, empty components, backslashes, `:` or
     absolute forms are refused;
-  - every component is checked with `lstat` at check time, so a symbolic
-    link present at that moment (file, directory or root ancestor) is
-    refused;
+  - every relative component is checked with `symlink_metadata` at check
+    time, so a detected symbolic link is refused. On Windows, every detected
+    reparse point is refused, including junctions; native execution is NOT_RUN.
+    Root canonicalization checks also reject redirected ancestors;
   - hard-linked files (`nlink > 1`) and non-regular files seen at check time
     are refused.
 
@@ -116,18 +117,19 @@ what they do not guarantee.
   - after `open`, the handle must be a regular file and, on Unix, the same
     file object (`dev`/`ino`) as at resolution, with one hard link;
   - the read is capped at `max_file_bytes + 1` bytes;
+  - length and modification time must match from resolution through open
+    and the final handle check; failure to obtain modification time is a coded
+    I/O rejection;
   - after the read, the handle's identity and length must equal those seen
     at `open`, and the bytes read must equal that length.
 
   On mismatch the whole file is rejected (`ChangedDuringRead`, or
   `TooLarge` / `Path(HardLinked)`). **Not detected:**
-  - growth or shrinkage between resolution and `open` (the length at
-    resolution is not compared with the length at `open`);
-  - same-size rewrites at any time;
-  - mtime/ctime changes.
+  - rewrites that preserve or restore checked metadata, including changes
+    hidden by timestamp granularity;
+  - ctime changes.
 
-  The fixed-size header read may exceed a very small `max_file_bytes` before
-  the file is rejected.
+  Limits smaller than the header are rejected before opening the file.
 - **Allowlisted metadata fields** (syntactic, not a privacy guarantee):
   - fixture keys are allowlisted;
   - prohibited keys (content, credential, account, pricing or quota) reject
@@ -222,23 +224,22 @@ are never opened.
     scope. Under Contract A V2 it is an optional hardening, not an absolute
     prerequisite; any production reading mechanism must still be implemented,
     tested and reviewed for what it actually does.
-- **No practical memory budget for output.**
-  - `max_entries` bounds directory iteration only.
-  - `max_file_bytes` is a per-file input limit, not a batch memory budget.
-    A single file within the limit can produce one record per line. Each
-    record clones run, environment, source and path provenance, the pairs of
-    every line are collected before validation, and all file reports of a
-    batch are retained.
-  - Retained memory can therefore be many times the input size. ABF9
-    extrapolates about 3 GiB of record slots for one default-limit file of
-    blank lines.
-  - Resource exhaustion can abort the process rather than return a coded
-    result.
-  - M1 is for small, stable, trusted synthetic fixtures only. Record, pair,
-    result and cumulative-byte budgets (or streaming), with coded
-    deterministic exhaustion, are a production prerequisite.
+- **Bounded record output, not a total byte budget.** ABF129 caps retained
+  outcomes at `synthetic::MAX_RECORD_OUTCOMES` (4096), shared across a root
+  call or applied to one single-file call. Both accepted and rejected records
+  count. A file exceeding the remaining budget is rejected as `OutputLimit`
+  before any of its records are built; earlier files remain visible and the
+  batch is `Incomplete`. Later files are still checked, including header-only
+  files that require no record slots. No successful truncation is reported.
+  - Input bytes remain bounded per file; directory entries and depth retain
+    their existing limits. One file is read at a time.
+  - Paths, file reports, skips, parser scratch allocations and allocator
+    overhead are not covered by a practical cumulative byte budget. Large
+    caller-selected entry/input limits can still exhaust memory.
+  - Use small, trusted fictional fixtures. A practical total memory budget
+    and allocation-failure handling remain production prerequisites.
 - **No coherent read snapshot.** See the read-change checks above:
-  - growth before `open` and same-size rewrites are not detected;
+  - changes preserving the checked length and modification time are not detected;
   - a read can combine bytes from different moments;
   - the origin header identifies the format; it does not authenticate the
     file.
@@ -265,3 +266,36 @@ are never opened.
   scoped to their scan run.
 - **Custom WSL automount roots** (`wsl.conf`) are not detected. Only
   `/mnt/<drive>` is rejected.
+
+## ABF129 controlled local reading
+
+ABF129 reuses the existing executable fixture reader and existing public scope,
+file reports and coverage codes. It adds the record-output cap above, stronger
+metadata-change checks and standard-library Windows reparse-attribute refusal.
+There is no new reader protocol, dependency, discovery or production integration.
+Missing paths return `PathRejection::Io(NotFound)`; open/read failures return
+`FileStatus::Rejected(Io(kind))`. Rejected files emit no records. Pending tails
+and rejected/partial records retain the existing explicit reporting semantics;
+`Read` never means complete usage. Diagnostics retain codes, not raw file bytes.
+
+Focused offline validation (run from the repository root):
+
+```sh
+TMPDIR="$PWD/rust/crates/abf-collection-boundary/target/abf129-tmp" \
+CARGO_TARGET_DIR="$PWD/rust/crates/abf-collection-boundary/target" \
+cargo test --offline --locked \
+  --manifest-path rust/crates/abf-collection-boundary/Cargo.toml \
+  -- --skip hard_links_and_non_regular_files_are_refused
+```
+
+Create that disposable TMPDIR before running. All fictional files stay inside
+this crate's target area and are removed by test fixture guards. The existing
+Unix socket fixture test exceeds the Unix socket pathname limit with this
+required in-crate TMPDIR; its setup fails before reader assertions. It remains
+unchanged and is excluded from the final focused run. Native Windows compilation,
+reparse behavior, Windows filesystem compatibility and WSL execution are NOT_RUN.
+No real histories, credentials, network or external directories were accessed.
+These tests do not prove a coherent snapshot, bounded wall time or production
+readiness. Path swaps can still redirect a standard path-based open; replacing a
+file with a FIFO can still block it. Locality checks reject explicit UNC/device
+inputs, not every remotely backed filesystem before contact.
