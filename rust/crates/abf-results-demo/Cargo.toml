@@ -1,0 +1,17 @@
+[package]
+name = "abf-results-demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = false
+
+[workspace]
+
+[dependencies]
+abf-catalog-plan-fixture = { path = "../abf-catalog-plan-fixture", version = "=0.1.0" }
+abf-collection-boundary = { path = "../abf-collection-boundary", version = "=0.0.0" }
+abf-reader-fixture = { path = "../abf-reader-fixture", version = "=0.1.0" }
+abf-results-fixture = { path = "../abf-results-fixture", version = "=0.1.0" }
+abf-selected-wsl-fixture = { path = "../abf-selected-wsl-fixture", version = "=0.1.0" }
+abf-source-run = { path = "../abf-source-run", version = "=0.1.0" }
+abf-supervisor-fixture = { path = "../abf-supervisor-fixture", version = "=0.1.0" }
