@@ -3,7 +3,7 @@ use crate::{Code, Diagnostic, Diagnostics, Field, Limits, Observation, ParseResu
 // Private, bounded JSON tree. Arrays are validated then discarded: never an extracted field.
 // Number spelling is borrowed so integer precision/range is never lost through floating point.
 #[derive(Debug)]
-enum Node<'a> {
+pub(crate) enum Node<'a> {
     Object(Vec<(String, Node<'a>)>),
     String(String),
     Number(&'a str),
@@ -11,7 +11,7 @@ enum Node<'a> {
     Other,
 }
 impl<'a> Node<'a> {
-    fn get(&self, key: &str) -> Option<&Node<'a>> {
+    pub(crate) fn get(&self, key: &str) -> Option<&Node<'a>> {
         match self {
             Self::Object(members) => members.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
@@ -256,7 +256,7 @@ impl<'a> Decoder<'a> {
     }
 }
 
-fn container(node: Option<&Node<'_>>) -> Field<()> {
+pub(crate) fn container(node: Option<&Node<'_>>) -> Field<()> {
     match node {
         None => Field::Absent,
         Some(Node::Null) => Field::Null,
@@ -264,7 +264,7 @@ fn container(node: Option<&Node<'_>>) -> Field<()> {
         _ => Field::WrongType,
     }
 }
-fn metadata(node: Option<&Node<'_>>, limits: Limits) -> Result<Field<Box<str>>, Code> {
+pub(crate) fn metadata(node: Option<&Node<'_>>, limits: Limits) -> Result<Field<Box<str>>, Code> {
     Ok(match node {
         None => Field::Absent,
         Some(Node::Null) => Field::Null,
@@ -277,7 +277,7 @@ fn metadata(node: Option<&Node<'_>>, limits: Limits) -> Result<Field<Box<str>>, 
         _ => Field::WrongType,
     })
 }
-fn integer<T: std::str::FromStr>(node: Option<&Node<'_>>) -> Field<T> {
+pub(crate) fn integer<T: std::str::FromStr>(node: Option<&Node<'_>>) -> Field<T> {
     match node {
         None => Field::Absent,
         Some(Node::Null) => Field::Null,
@@ -288,13 +288,16 @@ fn integer<T: std::str::FromStr>(node: Option<&Node<'_>>) -> Field<T> {
         _ => Field::WrongType,
     }
 }
-fn child_integer<T: std::str::FromStr>(parent: Option<&Node<'_>>, key: &str) -> Field<T> {
+pub(crate) fn child_integer<T: std::str::FromStr>(
+    parent: Option<&Node<'_>>,
+    key: &str,
+) -> Field<T> {
     match parent {
         Some(node @ Node::Object(_)) => integer(node.get(key)),
         _ => Field::Unsupported,
     }
 }
-fn diagnose<T>(field: &Field<T>, diagnostics: &mut Diagnostics) {
+pub(crate) fn diagnose<T>(field: &Field<T>, diagnostics: &mut Diagnostics) {
     match field {
         Field::WrongType | Field::OutOfRange => diagnostics.insert(Diagnostic::InvalidField),
         Field::Null => diagnostics.insert(Diagnostic::ExplicitNull),
@@ -366,33 +369,44 @@ fn observe(
     Ok(o)
 }
 
+/// Shared bounded frame decoding: size and correlation budgets, UTF-8, grammar, duplicate keys,
+/// trailing data and object root. Callers must have validated `limits` already.
+pub(crate) fn decode_frame<'a>(
+    frame: &'a [u8],
+    correlation: Option<&str>,
+    limits: Limits,
+) -> Result<Node<'a>, Code> {
+    if frame.len() > limits.frame_bytes {
+        return Err(Code::FrameBudget);
+    }
+    if correlation.is_some_and(|s| s.len() > limits.string_bytes) {
+        return Err(Code::StringBudget);
+    }
+    let text = std::str::from_utf8(frame).map_err(|_| Code::InvalidUtf8)?;
+    let mut decoder = Decoder {
+        text,
+        pos: 0,
+        entries: 0,
+        limits,
+    };
+    let root = decoder.value(0)?;
+    decoder.whitespace()?;
+    if decoder.peek().is_some() {
+        return Err(Code::TrailingData);
+    }
+    if !matches!(root, Node::Object(_)) {
+        return Err(Code::RootShape);
+    }
+    Ok(root)
+}
+
 /// Parse one complete caller-owned synthetic frame. No discovery, identity or sequence logic.
 pub fn parse(frame: &[u8], correlation: Option<&str>, limits: Limits) -> ParseResult {
     fn inner(frame: &[u8], correlation: Option<&str>, limits: Limits) -> Result<ParseResult, Code> {
         if !limits.valid() {
             return Err(Code::InvalidLimits);
         }
-        if frame.len() > limits.frame_bytes {
-            return Err(Code::FrameBudget);
-        }
-        if correlation.is_some_and(|s| s.len() > limits.string_bytes) {
-            return Err(Code::StringBudget);
-        }
-        let text = std::str::from_utf8(frame).map_err(|_| Code::InvalidUtf8)?;
-        let mut decoder = Decoder {
-            text,
-            pos: 0,
-            entries: 0,
-            limits,
-        };
-        let root = decoder.value(0)?;
-        decoder.whitespace()?;
-        if decoder.peek().is_some() {
-            return Err(Code::TrailingData);
-        }
-        if !matches!(root, Node::Object(_)) {
-            return Err(Code::RootShape);
-        }
+        let root = decode_frame(frame, correlation, limits)?;
         let result = ParseResult::Observation(observe(&root, correlation, limits)?);
         if result.retained_bytes().ok_or(Code::ResultBudget)? > limits.result_bytes {
             return Err(Code::ResultBudget);

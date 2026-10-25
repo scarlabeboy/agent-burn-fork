@@ -134,3 +134,32 @@ privacy, independence, budgets, deterministic arbitrary bytes and mutations.
 The ABF96 report records actual commands, environment, counts and limitations at
 `/tmp/abf96-g1b-opencode-parser/report.md` in the gate's execution environment.
 No native Windows, WSL transport or real-history tests are authorized here.
+
+## Claude Code record parser (ABF134B, fictional records only)
+
+`parse_claude(frame, correlation, limits) -> ClaudeParseResult` parses one complete
+Claude Code JSONL record object with the same bounded decoder, `Limits`, `Field<T>`
+states, `Status`, `Diagnostics` and `Code` values as `parse`. Not validated against
+real histories; no collector, file I/O, line splitting, observation envelope or
+deduplication exists.
+
+Retained claims: `sessionId`, `requestId`, `timestamp` (raw string, not parsed),
+`message.id`, `message.model`, and `message.usage` `input_tokens`, `output_tokens`,
+`cache_read_input_tokens`, `cache_creation_input_tokens` and the
+`cache_creation.ephemeral_5m/1h_input_tokens` breakdown. Everything else (content,
+tool data, paths, `costUSD`, unknown keys) is grammar-checked and discarded.
+A non-object parent gives `Unsupported` children, as in the OpenCode parser.
+`ClaudeObservation::cache_creation()` never adds the flat claim to the breakdown: an
+existing valid breakdown is summed (overflow is `OutOfRange`); an empty breakdown or
+absent object uses the flat claim; an invalid object or child is reported, not replaced.
+Unknown `*_tokens` usage keys and unknown breakdown keys add `UnsupportedComponent`;
+other usage keys (`service_tier`, `speed`, ...) are ignored. Status is `Incomplete`
+without a valid input, output, cache-read or cache-creation claim.
+`Debug` prints field states only, never identifiers, timestamps or counts.
+
+Boundary: real Claude lines often carry large content. A frame over 65,536 bytes, or
+with more than 256 members/elements (content arrays count), is rejected with
+`FrameBudget`/`EntryBudget`, never truncated or treated as zero. Splitting lines,
+detecting oversize lines without buffering them, and any content-skipping scanner or
+larger ceiling belong to a future collector gate. Equal bytes or equal claims imply no
+event identity; source-local deduplication rules are not implemented here.

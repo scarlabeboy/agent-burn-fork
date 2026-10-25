@@ -1,7 +1,9 @@
-//! Experimental synthetic-only OpenCode record parsing. No collector or I/O.
+//! Experimental synthetic-only OpenCode and Claude Code record parsing. No collector or I/O.
 #![forbid(unsafe_code)]
 
+mod claude;
 mod opencode;
+pub use claude::{ClaudeObservation, ClaudeParseResult, parse_claude};
 pub use opencode::parse;
 
 /// Callers may lower, but never raise, the experimental hard ceilings.
@@ -22,12 +24,15 @@ impl Limits {
         result_bytes: 4096,
     };
     pub(crate) fn valid(self) -> bool {
+        self.valid_with_result_floor(size_of::<ParseResult>())
+    }
+    pub(crate) fn valid_with_result_floor(self, floor: usize) -> bool {
         self.frame_bytes <= Self::MAX.frame_bytes
             && self.depth <= Self::MAX.depth
             && self.entries <= Self::MAX.entries
             && self.string_bytes <= Self::MAX.string_bytes
             && self.result_bytes <= Self::MAX.result_bytes
-            && self.result_bytes >= size_of::<ParseResult>()
+            && self.result_bytes >= floor
     }
 }
 
