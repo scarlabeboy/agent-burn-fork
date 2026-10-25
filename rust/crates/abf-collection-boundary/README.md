@@ -333,3 +333,29 @@ LF-terminated line to `abf_parser::parse_claude_long`. It adds one sibling depen
   between a path check and the open, are not detected (Contract A V2 limits; path-based).
 - **Completeness** is traversal and read coverage only. Rejected, oversized and blank lines and
   pending tails leave it `Complete` and must never be read as zero usage.
+
+## Claude usage summary (ABF134E, fictional trees only)
+
+`ClaudeBatch::summary()` (`claude_summary::summarize_claude_batch`) reduces one batch to
+integers, enums and the caller's own opaque labels: no record, path, name, identifier,
+timestamp or content, and a `Debug` that shows nothing input-derived. It is pure,
+deterministic and never fails; every gap is a field.
+
+- **Basis:** sums of *observed record claims*, fixed as `CountingBasis::ObservedRecordClaims`
+  with `DuplicateIdentity::Unresolved`. Repeated records each count; nothing is deduplicated,
+  and sums are neither unique physical events nor billed consumption.
+- **Components:** input, output, cache creation and cache read are independent sums with no
+  combined total. Cache creation is the parser's resolved claim: a valid breakdown alone, else
+  the flat claim, never both (`records.cache_creation_flat_ignored` counts overridden flats).
+- **Value outcomes** (names follow `abf-counting`, which has no Claude input and so is not a
+  dependency): `ReportedClaimSum(u64)` (an explicit zero is a sum of 0), `NoValidClaims`,
+  `Indeterminate(NoObservations)` for a batch with no observation, and `Overflow` for a
+  checked-`u64` overflow (sticky for that component; never wrapped, saturated or zero).
+  `states` partitions observations per component into valid / valid-zero / absent / null /
+  wrong-type / out-of-range / unsupported-parent.
+- **Coverage kept visible:** batch completeness, files read and rejected by reason, skipped
+  entries (may-hide-data vs out-of-scope), parser rejections per code, oversized and blank
+  lines, pending tails, and `Caveats` flags. Rejected and oversized lines, pending tails and a
+  `Complete` batch coexist: a clean summary is never a completeness proof.
+- **Scope:** one batch, one environment, one source. No Windows or Computer totals; summaries
+  are not merged.

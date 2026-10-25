@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod claude_jsonl;
+pub mod claude_summary;
 pub mod identity;
 pub mod observation;
 pub mod scope;
@@ -37,6 +38,11 @@ pub use claude_jsonl::{
     ClaudeFileStatus, ClaudeLine, ClaudeLineCounts, ClaudeLineOutcome, ClaudeReadLimits,
     ClaudeRecordRef, ClaudeTotals, MAX_FILES_CEILING, MAX_LINE_BYTES_CEILING, MAX_RECORDS_CEILING,
     MAX_TOTAL_BYTES_CEILING, collect_claude_jsonl_root,
+};
+pub use claude_summary::{
+    Caveats, ClaimStates, ClaudeComponents, ClaudeSummary, ComponentSummary, ComponentValue,
+    CountingBasis, DuplicateIdentity, FileSummary, IndeterminateReason, LineSummary, RecordCounts,
+    RejectionCounts, SkipSummary, summarize_claude_batch,
 };
 pub use identity::{
     EnvironmentIdentity, EnvironmentInstance, EnvironmentKind, Harness, IdentityError, OpaqueId,

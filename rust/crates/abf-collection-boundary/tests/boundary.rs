@@ -723,6 +723,10 @@ fn no_implicit_user_directory_or_process_access_in_source() {
     let sources = [
         ("lib.rs", include_str!("../src/lib.rs")),
         ("claude_jsonl.rs", include_str!("../src/claude_jsonl.rs")),
+        (
+            "claude_summary.rs",
+            include_str!("../src/claude_summary.rs"),
+        ),
         ("identity.rs", include_str!("../src/identity.rs")),
         ("observation.rs", include_str!("../src/observation.rs")),
         ("scope.rs", include_str!("../src/scope.rs")),

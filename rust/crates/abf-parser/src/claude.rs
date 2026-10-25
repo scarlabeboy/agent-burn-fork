@@ -68,7 +68,9 @@ impl ClaudeObservation {
             }
             Field::Null => Field::Null,
             Field::OutOfRange => Field::OutOfRange,
-            Field::WrongType | Field::Unsupported => Field::WrongType,
+            Field::WrongType => Field::WrongType,
+            // The usage object is unavailable, so no cache-creation claim could be read.
+            Field::Unsupported => Field::Unsupported,
         }
     }
 }

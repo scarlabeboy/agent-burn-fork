@@ -384,3 +384,23 @@ fn deterministic_and_independent_results() {
     let b = parse_claude(FULL.as_bytes(), Some("b"), Limits::MAX);
     assert_ne!(a, b);
 }
+
+#[test]
+fn cache_creation_is_unsupported_when_usage_is_unavailable() {
+    for text in [
+        "{}",
+        r#"{"message":null}"#,
+        r#"{"message":{}}"#,
+        r#"{"message":{"usage":null}}"#,
+        r#"{"message":{"usage":"x"}}"#,
+    ] {
+        let o = obs(text);
+        assert_eq!(o.cache_creation(), Field::Unsupported, "{text}");
+        assert_eq!(o.input, Field::Unsupported, "{text}");
+    }
+    // An available usage object without the claim is Absent, not Unsupported.
+    assert_eq!(
+        obs(r#"{"message":{"usage":{}}}"#).cache_creation(),
+        Field::Absent
+    );
+}
