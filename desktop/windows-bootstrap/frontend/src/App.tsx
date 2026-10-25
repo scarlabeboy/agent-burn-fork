@@ -217,127 +217,129 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
       </nav>
 
       <main className="content" aria-labelledby="page-title">
-        <div className="page-head">
-          <h1 id="page-title">{pageHeading(selection)}</h1>
-          <Status tone={derived ? 'derived' : 'unavailable'}>{environment.status}</Status>
-        </div>
-        <p className="page-scope">{environment.scope}</p>
-        <p className="page-note">{shellText.explanation}</p>
-        <p className="page-note" role="status">
-          {bridgeState.status === 'synthetic'
-            ? 'Local synthetic bridge responded · DEMO / SYNTHETIC · collection disabled'
-            : bridgeState.status === 'loading'
-              ? 'Local synthetic bridge: loading · collection disabled'
-              : 'Local synthetic bridge unavailable · collection disabled'}
-        </p>
+        <div className="content__inner">
+          <div className="page-head">
+            <h1 id="page-title">{pageHeading(selection)}</h1>
+            <Status tone={derived ? 'derived' : 'unavailable'}>{environment.status}</Status>
+          </div>
+          <p className="page-scope">{environment.scope}</p>
+          <p className="page-note">{shellText.explanation}</p>
+          <p className="page-note" role="status">
+            {bridgeState.status === 'synthetic'
+              ? 'Local synthetic bridge responded · DEMO / SYNTHETIC · collection disabled'
+              : bridgeState.status === 'loading'
+                ? 'Local synthetic bridge: loading · collection disabled'
+                : 'Local synthetic bridge unavailable · collection disabled'}
+          </p>
 
-        {summary ? <p className="page-note">Synthetic sources: {sourceNames}. Tokens = input tokens + output tokens.
-          Sessions use source/harness identities, joined only by explicit fixture equivalence in Computer.
-          Demo equivalents count once; unrelated matching values remain distinct.</p> : null}
+          {summary ? <p className="page-note">Synthetic sources: {sourceNames}. Tokens = input tokens + output tokens.
+            Sessions use source/harness identities, joined only by explicit fixture equivalence in Computer.
+            Demo equivalents count once; unrelated matching values remain distinct.</p> : null}
 
-        <section className="metrics" aria-label="Overview metrics">
-          {metricLabels.map((label, index) => (
-            <article className="metric" key={label}>
-              <h2 className="metric__label">{label}</h2>
-              <p className="metric__value">{values[index] ?? unavailable}</p>
-              <p className="metric__detail">{values[index] === undefined ? 'Not observed' : 'DEMO / SYNTHETIC'}</p>
-            </article>
-          ))}
-        </section>
-
-        <Region id="fictional-results" title="Fixed fictional results - demonstration only">
-          <p className="page-note">Captured from fixed fictional fixtures. Reported claim sums, not deduplicated usage.
-            All scenarios are fixed and independent of the selected environment and harness.
-            Freshness is logical, not measured age. No real account data is shown.</p>
-          <pre className="fictional-results" tabIndex={0} role="region" aria-label="Fixed fictional results provenance and limits">{fictionalResults.preamble}</pre>
-          <ul className="scenarios" aria-label="Fictional scenarios, demonstration only">
-            {fictionalResults.scenarios.map((scenario) => (
-              <li key={scenario.title}>
-                <details className="scenario">
-                  <summary>{scenario.title}</summary>
-                  <pre className="fictional-results" tabIndex={0} role="region" aria-label={`Fixed fictional output: ${scenario.title}`}>{scenario.text}</pre>
-                </details>
-              </li>
+          <section className="metrics" aria-label="Overview metrics">
+            {metricLabels.map((label, index) => (
+              <article className="metric" key={label}>
+                <h2 className="metric__label">{label}</h2>
+                <p className="metric__value">{values[index] ?? unavailable}</p>
+                <p className="metric__detail">{values[index] === undefined ? 'Not observed' : 'DEMO / SYNTHETIC'}</p>
+              </article>
             ))}
-          </ul>
-        </Region>
-
-        {fictionalClaude !== undefined && environment.id === 'selected-wsl' && harness.id === 'claude-code'
-          ? <FictionalClaudePanel state={fictionalClaude} /> : null}
-
-        {isGeneral ? null : (
-          <section className="quotas" aria-labelledby="quota-section-title">
-            <h2 className="section-title" id="quota-section-title">{harness.label} quota and status</h2>
-            <p className="section-note">{shellText.quotaScope}</p>
-            <div className="quotas__grid">
-              {harness.quotaPanels.map((panel) => <QuotaPanel key={panel.id} panel={panel} />)}
-            </div>
           </section>
-        )}
 
-        <div className="grid">
-          <Region id="activity" title={isGeneral ? 'Synthetic activity' : `${harness.label} synthetic activity`}>
-            {summary ? <ul className="activity">
-              {summary.activity.map((day) => <li className="activity__day" key={day.id}>
-                <span>{day.id} UTC · {day.tokens} synthetic tokens</span>
-                <progress aria-label={`${day.id} UTC synthetic tokens`} value={day.tokens}
-                  max={Math.max(1, ...summary.activity.map((row) => row.tokens))}>{day.tokens} tokens</progress>
-              </li>)}
-            </ul> : <EmptyState title="No spending or activity observed" detail="No synthetic activity available. Collection is disabled." />}
+          <Region id="fictional-results" title="Fixed fictional results - demonstration only">
+            <p className="page-note">Captured from fixed fictional fixtures. Reported claim sums, not deduplicated usage.
+              All scenarios are fixed and independent of the selected environment and harness.
+              Freshness is logical, not measured age. No real account data is shown.</p>
+            <pre className="fictional-results" tabIndex={0} role="region" aria-label="Fixed fictional results provenance and limits">{fictionalResults.preamble}</pre>
+            <ul className="scenarios" aria-label="Fictional scenarios, demonstration only">
+              {fictionalResults.scenarios.map((scenario) => (
+                <li key={scenario.title}>
+                  <details className="scenario">
+                    <summary>{scenario.title}</summary>
+                    <pre className="fictional-results" tabIndex={0} role="region" aria-label={`Fixed fictional output: ${scenario.title}`}>{scenario.text}</pre>
+                  </details>
+                </li>
+              ))}
+            </ul>
           </Region>
 
-          {isGeneral ? (
-            <Region id="harness-breakdown" title="Breakdown by harness">
-              <ul className="breakdown">
-                {harnesses.filter((entry) => entry.id !== 'general').map((entry) => {
-                  const tokens = summary?.harnesses.find((row) => row.id === entry.id)?.tokens;
-                  return (
+          {fictionalClaude !== undefined && environment.id === 'selected-wsl' && harness.id === 'claude-code'
+            ? <FictionalClaudePanel state={fictionalClaude} /> : null}
+
+          {isGeneral ? null : (
+            <section className="quotas" aria-labelledby="quota-section-title">
+              <h2 className="section-title" id="quota-section-title">{harness.label} quota and status</h2>
+              <p className="section-note">{shellText.quotaScope}</p>
+              <div className="quotas__grid">
+                {harness.quotaPanels.map((panel) => <QuotaPanel key={panel.id} panel={panel} />)}
+              </div>
+            </section>
+          )}
+
+          <div className="grid">
+            <Region id="activity" title={isGeneral ? 'Synthetic activity' : `${harness.label} synthetic activity`}>
+              {summary ? <ul className="activity">
+                {summary.activity.map((day) => <li className="activity__day" key={day.id}>
+                  <span>{day.id} UTC · {day.tokens} synthetic tokens</span>
+                  <progress aria-label={`${day.id} UTC synthetic tokens`} value={day.tokens}
+                    max={Math.max(1, ...summary.activity.map((row) => row.tokens))}>{day.tokens} tokens</progress>
+                </li>)}
+              </ul> : <EmptyState title="No spending or activity observed" detail="No synthetic activity available. Collection is disabled." />}
+            </Region>
+
+            {isGeneral ? (
+              <Region id="harness-breakdown" title="Breakdown by harness">
+                <ul className="breakdown">
+                  {harnesses.filter((entry) => entry.id !== 'general').map((entry) => {
+                    const tokens = summary?.harnesses.find((row) => row.id === entry.id)?.tokens;
+                    return (
+                      <li className="breakdown__row" key={entry.id}>
+                        <span>{entry.label}</span>
+                        <Status tone={tokens === undefined ? 'unavailable' : 'synthetic'}>
+                          {tokens === undefined ? unavailable : `DEMO · ${tokens} synthetic tokens`}
+                        </Status>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </Region>
+            ) : null}
+
+            {derived ? (
+              <Region id="sources" title="Derived from">
+                <ul className="breakdown">
+                  {environments.filter((entry) => entry.kind === 'collection').map((entry) => (
                     <li className="breakdown__row" key={entry.id}>
                       <span>{entry.label}</span>
-                      <Status tone={tokens === undefined ? 'unavailable' : 'synthetic'}>
-                        {tokens === undefined ? unavailable : `DEMO · ${tokens} synthetic tokens`}
-                      </Status>
+                      <Status tone="unavailable">{entry.status}</Status>
                     </li>
-                  );
-                })}
-              </ul>
-            </Region>
-          ) : null}
+                  ))}
+                </ul>
+              </Region>
+            ) : null}
 
-          {derived ? (
-            <Region id="sources" title="Derived from">
-              <ul className="breakdown">
-                {environments.filter((entry) => entry.kind === 'collection').map((entry) => (
-                  <li className="breakdown__row" key={entry.id}>
-                    <span>{entry.label}</span>
-                    <Status tone="unavailable">{entry.status}</Status>
-                  </li>
-                ))}
-              </ul>
+            <Region id="models" title={isGeneral ? 'Models' : `${harness.label} models`}>
+              <table className="table">
+                <caption className="visually-hidden">Models used</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Model</th>
+                    <th scope="col">Tokens</th>
+                    <th scope="col">Estimated API cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary ? summary.models.map((model) => <tr key={model.id}>
+                    <th scope="row">{model.id} (DEMO)</th>
+                    <td>{model.tokens}</td>
+                    <td>{unavailable}</td>
+                  </tr>) : <tr>
+                    <td colSpan={3}>No models observed. Collection is disabled.</td>
+                  </tr>}
+                </tbody>
+              </table>
             </Region>
-          ) : null}
-
-          <Region id="models" title={isGeneral ? 'Models' : `${harness.label} models`}>
-            <table className="table">
-              <caption className="visually-hidden">Models used</caption>
-              <thead>
-                <tr>
-                  <th scope="col">Model</th>
-                  <th scope="col">Tokens</th>
-                  <th scope="col">Estimated API cost</th>
-                </tr>
-              </thead>
-              <tbody>
-                {summary ? summary.models.map((model) => <tr key={model.id}>
-                  <th scope="row">{model.id} (DEMO)</th>
-                  <td>{model.tokens}</td>
-                  <td>{unavailable}</td>
-                </tr>) : <tr>
-                  <td colSpan={3}>No models observed. Collection is disabled.</td>
-                </tr>}
-              </tbody>
-            </table>
-          </Region>
+          </div>
         </div>
       </main>
 

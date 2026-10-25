@@ -125,18 +125,23 @@
   background: var(--accent);
 }
 
-/* Content */
+/* Content: the scroller spans the whole grid area so its scrollbar sits at the window edge;
+   only the inner column is centered and width-limited. */
 .content {
   grid-area: content;
   /* Keep absolute descendants (the hidden table caption) inside this scroller. */
   position: relative;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.content__inner {
   display: grid;
   align-content: start;
   gap: 1rem;
   width: min(100%, 90rem);
   margin-inline: auto;
   padding: clamp(0.75rem, 2.5vw, 1.75rem);
-  overflow-y: auto;
 }
 
 .page-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; }
@@ -291,7 +296,7 @@
 /* Ultrawide: keep line lengths readable and use extra columns for panels. */
 @media (min-width: 120rem) {
   .app { grid-template-columns: 15rem minmax(0, 1fr); }
-  .content { width: min(100%, 110rem); }
+  .content__inner { width: min(100%, 110rem); }
 }
 
 /* Fixed demo UTC activity; numeric values remain visible without the meters. */

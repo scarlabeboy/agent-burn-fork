@@ -550,3 +550,24 @@ test('harness totals distinguish available DEMO values from unavailable data and
     assert.doesNotMatch(absent, /status--synthetic|synthetic tokens/u);
   }
 });
+
+test('main scroller spans its grid area and only the inner column is width-limited', () => {
+  // Static checks only: JSDOM and static rendering cannot prove WebView2 scrollbar geometry.
+  const html = renderToStaticMarkup(createElement(ShellView, {
+    selection: { environment: 'computer', harness: 'general' }, onSelectEnvironment: noop, onSelectHarness: noop,
+    bridgeState: { status: 'loading' },
+  }));
+  const main = html.match(/<main class="content"[^>]*>([\s\S]*)<\/main>/u)?.[1] ?? '';
+  assert.match(main, /^<div class="content__inner">/u);
+  assert.match(main, /<caption class="visually-hidden">Models used<\/caption>/u);
+  const css = readFileSync(new URL('../frontend/src/styles/shell.css', import.meta.url), 'utf8');
+  const rule = (selector: string) => css.match(new RegExp(`(?:^|\\n)${selector.replace('.', '\\.')} \\{([^}]*)\\}`, 'u'))?.[1] ?? '';
+  const scroller = rule('.content');
+  assert.match(scroller, /overflow-y:\s*auto/u);
+  assert.doesNotMatch(scroller, /(?<![-\w])(?:width|max-width|margin(?:-inline)?)\s*:/u);
+  const inner = rule('.content__inner');
+  assert.match(inner, /width:\s*min\(100%,\s*90rem\)/u);
+  assert.match(inner, /margin-inline:\s*auto/u);
+  assert.doesNotMatch(inner, /overflow/u);
+  assert.match(css, /@media \(min-width: 120rem\)[\s\S]*\.content__inner \{ width: min\(100%, 110rem\); \}/u);
+});
