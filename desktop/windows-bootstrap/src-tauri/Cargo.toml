@@ -12,6 +12,7 @@ default = []
 custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
+abf-collection-boundary = { path = "../../../rust/crates/abf-collection-boundary" }
 serde = { version = "=1.0.229", features = ["derive"] }
 tauri = "=2.12.3"
 

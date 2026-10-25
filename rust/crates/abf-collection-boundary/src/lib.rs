@@ -26,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod claude_demo;
 pub mod claude_jsonl;
 pub mod claude_summary;
 pub mod identity;
@@ -37,7 +38,7 @@ pub use claude_jsonl::{
     CLAUDE_EXTENSION, ClaudeBatch, ClaudeCollectError, ClaudeFileRejection, ClaudeFileReport,
     ClaudeFileStatus, ClaudeLine, ClaudeLineCounts, ClaudeLineOutcome, ClaudeReadLimits,
     ClaudeRecordRef, ClaudeTotals, MAX_FILES_CEILING, MAX_LINE_BYTES_CEILING, MAX_RECORDS_CEILING,
-    MAX_TOTAL_BYTES_CEILING, collect_claude_jsonl_root,
+    MAX_TOTAL_BYTES_CEILING, collect_claude_jsonl_memory, collect_claude_jsonl_root,
 };
 pub use claude_summary::{
     Caveats, ClaimStates, ClaudeComponents, ClaudeSummary, ComponentSummary, ComponentValue,

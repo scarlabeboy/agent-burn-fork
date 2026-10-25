@@ -8,6 +8,8 @@ import { environments, harnesses, shellText, unavailable } from './synthetic.ts'
 import type { EnvironmentId, HarnessId, QuotaPanelDefinition } from './synthetic.ts';
 import { fictionalResultsSnapshot } from './fictionalResultsSnapshot.ts';
 import { splitFictionalResults } from './fictionalResultsView.ts';
+import { fictionalClaudeBridge } from './fictionalClaudeBridge.ts';
+import type { ComponentId, ComponentSummary, FictionalClaudeState, FictionalClaudeSummary } from './fictionalClaudeBridge.ts';
 
 const fictionalResults = splitFictionalResults(fictionalResultsSnapshot);
 
@@ -18,6 +20,8 @@ type ShellViewProps = Readonly<{
   onSelectEnvironment: (id: EnvironmentId) => void;
   onSelectHarness: (id: HarnessId) => void;
   bridgeState?: BridgeState;
+  /** Explicit fictional Claude summary; when omitted nothing extra is rendered. */
+  fictionalClaude?: FictionalClaudeState;
 }>;
 
 function Status({ tone, children }: Readonly<{ tone: 'unavailable' | 'derived' | 'synthetic'; children: React.ReactNode }>): React.JSX.Element {
@@ -42,6 +46,113 @@ function EmptyState({ title, detail }: Readonly<{ title: string; detail: string 
   );
 }
 
+const claudeComponents: readonly (readonly [ComponentId, string])[] = Object.freeze([
+  ['input', 'Input tokens'], ['output', 'Output tokens'],
+  ['cacheCreation', 'Cache creation tokens'], ['cacheRead', 'Cache read tokens'],
+] as const);
+
+/** Distinguishes a sum (an explicit zero stays "0"), no valid claims, no observations and overflow. */
+function claudeValueText(component: ComponentSummary): string {
+  switch (component.value.kind) {
+    case 'sum': return `${component.value.amount} observed claims (fictional)`;
+    case 'no-valid-claims': return 'No valid claims';
+    case 'indeterminate': return 'Unavailable - no observations';
+    case 'overflow': return 'Overflow - sum exceeds 64 bits';
+  }
+}
+
+function claudeGaps(summary: FictionalClaudeSummary): string[] {
+  const { caveats, lines, files, skipped } = summary;
+  return [
+    caveats.incompleteBatch ? 'Incomplete coverage: traversal or reading did not finish for every candidate.' : '',
+    caveats.unparsedLines ? `Parser gaps: ${lines.rejected.total} rejected and ${lines.oversized} oversized lines were not counted.` : '',
+    caveats.pendingTails ? `Pending tails: ${lines.pendingTailBytes} bytes in ${lines.filesWithPendingTail} file(s) were not parsed.` : '',
+    caveats.rejectedFiles ? `Rejected files: ${files.rejected} file(s) were not read.` : '',
+    caveats.skippedInScope ? `Skipped entries: ${skipped.mayHideData} may hide data.` : '',
+  ].filter((entry) => entry !== '');
+}
+
+function FictionalClaudePanel({ state }: Readonly<{ state: FictionalClaudeState }>): React.JSX.Element {
+  const title = 'Fictional Claude usage summary - demonstration only';
+  if (state.status !== 'fictional') {
+    return (
+      <Region id="fictional-claude" title={title}>
+        <p className="page-note" role="status">{state.status === 'loading'
+          ? 'Fictional Claude summary: loading'
+          : 'Fictional Claude summary unavailable. Nothing is shown in its place.'}</p>
+      </Region>
+    );
+  }
+  const { summary } = state;
+  const gaps = claudeGaps(summary);
+  return (
+    <Region id="fictional-claude" title={title}>
+      <p><Status tone="synthetic">FICTIONAL FIXTURE · not your data</Status></p>
+      <p className="page-note">Produced by the Rust parser, collector and summary from a fixed fictional fixture. No
+        real Claude history, account, quota or spending is read. This is not a Selected WSL, Windows or Computer total.</p>
+      <p className="page-note">Counting basis: observed record claims, every record counted. Duplicate-record identity
+        is unresolved, so repeated records count each time; these are neither unique events nor billed consumption.</p>
+      <table className="table">
+        <caption className="visually-hidden">Observed claims by token component, fictional</caption>
+        <thead>
+          <tr>
+            <th scope="col">Component</th>
+            <th scope="col">Observed claim sum</th>
+            <th scope="col">Valid claims</th>
+            <th scope="col">Explicit zero</th>
+            <th scope="col">Absent</th>
+            <th scope="col">Null</th>
+            <th scope="col">Invalid</th>
+            <th scope="col">Parent unavailable</th>
+          </tr>
+        </thead>
+        <tbody>
+          {claudeComponents.map(([id, label]) => {
+            const component = summary.components[id];
+            const { states } = component;
+            return (
+              <tr key={id} data-component={id} data-outcome={component.value.kind}>
+                <th scope="row">{label}</th>
+                <td>{claudeValueText(component)}</td>
+                <td>{states.valid}</td>
+                <td>{states.validZero}</td>
+                <td>{states.absent}</td>
+                <td>{states.null}</td>
+                <td>{states.wrongType + states.outOfRange}</td>
+                <td>{states.unsupported}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="page-note">Cache tokens are shown separately and never added to input or output. Cache creation
+        uses the detailed breakdown when present and is never added to the flat claim
+        ({summary.records.cacheCreationFlatIgnored} record(s) had both).</p>
+      <ul className="breakdown" aria-label="Fictional Claude records and coverage">
+        <li className="breakdown__row"><span>Records parsed</span>
+          <span>{summary.records.observations} (accepted {summary.records.accepted}, qualified {summary.records.qualified}, incomplete {summary.records.incomplete})</span></li>
+        <li className="breakdown__row"><span>Records with a valid / no valid token claim</span>
+          <span>{summary.records.withValidClaim} / {summary.records.withoutValidClaim}</span></li>
+        <li className="breakdown__row"><span>Files read / rejected</span>
+          <span>{summary.files.read} / {summary.files.rejected}</span></li>
+        <li className="breakdown__row"><span>Lines terminated</span><span>{summary.lines.terminatedLines}</span></li>
+        <li className="breakdown__row"><span>Parser rejections / oversized / blank</span>
+          <span>{summary.lines.rejected.total} / {summary.lines.oversized} / {summary.lines.blank}</span></li>
+        <li className="breakdown__row"><span>Pending tails</span>
+          <span>{summary.lines.filesWithPendingTail} file(s), {summary.lines.pendingTailBytes} bytes, not parsed</span></li>
+        <li className="breakdown__row"><span>Skipped entries</span>
+          <span>{summary.skipped.total} ({summary.skipped.mayHideData} may hide data)</span></li>
+        <li className="breakdown__row"><span>Collection</span><span>{summary.completeness}</span></li>
+      </ul>
+      {gaps.length > 0 ? (
+        <ul className="breakdown" aria-label="Fictional Claude coverage gaps">
+          {gaps.map((gap) => <li className="breakdown__row" key={gap}>{gap}</li>)}
+        </ul>
+      ) : <p className="page-note">No known gaps observed. This is not a completeness proof.</p>}
+    </Region>
+  );
+}
+
 function QuotaPanel({ panel }: Readonly<{ panel: QuotaPanelDefinition }>): React.JSX.Element {
   return (
     <article className="quota" aria-labelledby={`quota-${panel.id}-title`}>
@@ -53,7 +164,7 @@ function QuotaPanel({ panel }: Readonly<{ panel: QuotaPanelDefinition }>): React
   );
 }
 
-export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bridgeState = { status: 'loading' } }: ShellViewProps): React.JSX.Element {
+export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bridgeState = { status: 'loading' }, fictionalClaude }: ShellViewProps): React.JSX.Element {
   const environment = environmentOf(selection);
   const harness = harnessOf(selection);
   const isGeneral = harness.id === 'general';
@@ -151,6 +262,9 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
           </ul>
         </Region>
 
+        {fictionalClaude !== undefined && environment.id === 'selected-wsl' && harness.id === 'claude-code'
+          ? <FictionalClaudePanel state={fictionalClaude} /> : null}
+
         {isGeneral ? null : (
           <section className="quotas" aria-labelledby="quota-section-title">
             <h2 className="section-title" id="quota-section-title">{harness.label} quota and status</h2>
@@ -242,6 +356,12 @@ export function App(): React.JSX.Element {
     void syntheticBridge.load().then((state) => { if (active) setBridgeState(state); });
     return () => { active = false; };
   }, []);
+  const [fictionalClaude, setFictionalClaude] = React.useState<FictionalClaudeState>({ status: 'loading' });
+  React.useEffect(() => {
+    let active = true;
+    void fictionalClaudeBridge.load().then((state) => { if (active) setFictionalClaude(state); });
+    return () => { active = false; };
+  }, []);
   const onSelectEnvironment = React.useCallback(
     (id: EnvironmentId) => setSelection((current) => selectEnvironment(current, id)),
     [],
@@ -250,5 +370,6 @@ export function App(): React.JSX.Element {
     (id: HarnessId) => setSelection((current) => selectHarness(current, id)),
     [],
   );
-  return <ShellView selection={selection} onSelectEnvironment={onSelectEnvironment} onSelectHarness={onSelectHarness} bridgeState={bridgeState} />;
+  return <ShellView selection={selection} onSelectEnvironment={onSelectEnvironment} onSelectHarness={onSelectHarness} bridgeState={bridgeState}
+    fictionalClaude={fictionalClaude} />;
 }

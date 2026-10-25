@@ -18,7 +18,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.test.json",
-    "test": "node --import tsx --test --test-isolation=none tests/App.test.tsx tests/syntheticAggregation.test.ts",
+    "test": "node --import tsx --test --test-isolation=none tests/App.test.tsx tests/syntheticAggregation.test.ts tests/fictionalClaude.test.tsx",
     "build": "pnpm run typecheck && vite build --config vite.config.ts"
   }
 }

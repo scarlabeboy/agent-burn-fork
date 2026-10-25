@@ -309,7 +309,7 @@ test('renders deterministically without runtime inputs', () => {
   }
 });
 
-test('frontend allows only the reviewed core invoke and synthetic command, with no network, timers or storage', () => {
+test('frontend allows only the reviewed core invoke and the two reviewed commands, with no network, timers or storage', () => {
   const root = fileURLToPath(new URL('../frontend/src/', import.meta.url));
   const files = (directory: string): string[] =>
     readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
@@ -321,9 +321,15 @@ test('frontend allows only the reviewed core invoke and synthetic command, with 
     /@tauri-apps|__TAURI|\binvoke\s*(?:<[^>]*>)?\s*\(|\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|setInterval|setTimeout|requestAnimationFrame|localStorage|sessionStorage|indexedDB|document\.cookie|node:fs|child_process|https?:\/\/|@import|url\(|@font-face/u;
   for (const file of sources) {
     let source = readFileSync(file, 'utf8');
-    if (file === join(root, 'syntheticBridge.ts')) {
+    // Each reviewed bridge file may hold exactly one official core import and one argument-free call.
+    const reviewed: Record<string, string> = {
+      'syntheticBridge.ts': 'abf_get_synthetic_snapshot',
+      'fictionalClaudeBridge.ts': 'abf_get_fictional_claude_summary',
+    };
+    const command = Object.entries(reviewed).find(([name]) => file === join(root, name))?.[1];
+    if (command !== undefined) {
       const allowedImport = "import { invoke } from '@tauri-apps/api/core';";
-      const allowedCall = "invoke<unknown>('abf_get_synthetic_snapshot')";
+      const allowedCall = `invoke<unknown>('${command}')`;
       assert.equal(source.split(allowedImport).length, 2, 'one official core invoke import');
       assert.equal(source.split(allowedCall).length, 2, 'one argument-free approved application command');
       source = source.replace(allowedImport, '').replace(allowedCall, '');
@@ -425,14 +431,29 @@ test('official core invoke sends only the approved command with no frontend argu
   }
 });
 
-test('native boundary registers exactly the synthetic command and enables only official IPC CSP endpoints', () => {
+test('native boundary registers exactly the two reviewed commands and enables only official IPC CSP endpoints', () => {
   const nativeRoot = new URL('../src-tauri/', import.meta.url);
   const main = readFileSync(new URL('src/main.rs', nativeRoot), 'utf8');
   const command = readFileSync(new URL('src/synthetic_snapshot.rs', nativeRoot), 'utf8');
   const build = readFileSync(new URL('build.rs', nativeRoot), 'utf8');
   const config = JSON.parse(readFileSync(new URL('tauri.conf.json', nativeRoot), 'utf8'));
   const handlers = [...main.matchAll(/\.invoke_handler\(tauri::generate_handler!\[([^\]]*)\]\)/gu)];
-  assert.deepEqual(handlers.map((match) => match[1]?.trim()), ['synthetic_snapshot::abf_get_synthetic_snapshot']);
+  assert.deepEqual(handlers.map((match) => match[1]?.replace(/\s+/gu, ' ').trim()), [
+    'synthetic_snapshot::abf_get_synthetic_snapshot, fictional_claude_summary::abf_get_fictional_claude_summary',
+  ]);
+  const claude = readFileSync(new URL('src/fictional_claude_summary.rs', nativeRoot), 'utf8');
+  assert.equal([...claude.matchAll(/#\[tauri::command\]/gu)].length, 1);
+  assert.match(claude, /fn abf_get_fictional_claude_summary\(\) -> String/u);
+  assert.match(claude, /abf_collection_boundary::claude_demo::fictional_demo_payload_json\(\)/u);
+  // No argument, state, path, environment, file or process access in the command itself.
+  assert.doesNotMatch(claude, /std::|tauri::(?:State|AppHandle|Manager)|\b(?:use|mod)\b|\b(?:async|unsafe)\b|SystemTime|rand|thread|spawn|include!|include_str!|include_bytes!|\benv\b|\bfs\b|\bpath\b|Path|File|Command/u);
+  const manifest = readFileSync(new URL('Cargo.toml', nativeRoot), 'utf8');
+  const dependencies = manifest.slice(manifest.indexOf('[dependencies]'), manifest.indexOf('[build-dependencies]'));
+  assert.deepEqual(dependencies.split('\n').map((line) => line.trim()).filter((line) => line !== '' && line !== '[dependencies]'), [
+    'abf-collection-boundary = { path = "../../../rust/crates/abf-collection-boundary" }',
+    'serde = { version = "=1.0.229", features = ["derive"] }',
+    'tauri = "=2.12.3"',
+  ], 'only the reviewed local path dependency is added');
   assert.equal([...command.matchAll(/#\[tauri::command\]/gu)].length, 1);
   assert.match(command, /fn abf_get_synthetic_snapshot\(\)/u);
   assert.doesNotMatch(command, /std::|tauri::(?:State|AppHandle|Manager)|\b(?:use|mod)\b|\b(?:async|unsafe)\b|SystemTime|rand|thread|spawn|include!|include_str!|include_bytes!/u);

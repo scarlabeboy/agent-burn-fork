@@ -3,9 +3,21 @@
 version = 4
 
 [[package]]
+name = "abf-collection-boundary"
+version = "0.0.0"
+dependencies = [
+ "abf-parser",
+]
+
+[[package]]
+name = "abf-parser"
+version = "0.1.0"
+
+[[package]]
 name = "abf-win-host-bootstrap"
 version = "0.0.0"
 dependencies = [
+ "abf-collection-boundary",
  "serde",
  "tauri",
  "tauri-build",

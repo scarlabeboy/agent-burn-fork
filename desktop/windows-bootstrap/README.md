@@ -110,3 +110,32 @@ rendering, CSP enforcement, profile isolation, OS compatibility and coexistence
 are NOT_RUN. No M6D/M6E native IPC operation or production integration is claimed. Native
 compilation or startup requires a separate gate; do not run cargo check, tauri
 dev/build, native installers or a development server as part of these checks.
+
+## Fictional Claude usage summary (ABF134F)
+
+A second argument-free command, `abf_get_fictional_claude_summary`, returns one JSON string
+(schema version 1) that the frontend validates strictly and renders in a clearly labelled
+panel for **Selected WSL / Claude Code only**; every other view is unchanged and an absent or
+invalid payload shows nothing in its place. It is **fictional**: the Rust command calls
+`abf_collection_boundary::claude_demo::fictional_demo_payload_json()`, which runs the real
+streaming collector, parser and summary over two checked-in fictional JSONL files
+(`rust/crates/abf-collection-boundary/fixtures/fictional-claude-demo/`, embedded at compile
+time). Nothing is read from disk, environment or any provider location at run time, no path or
+root is accepted, and the payload carries no identifier, label, name, timestamp, model or
+content. Its provenance is the fixed `fictional-fixture` and its host match must be
+`simulated`; a real-data payload would need its own provenance and approval.
+
+The panel shows four separate observed-claim sums (input, output, cache creation, cache read;
+sums are decimal strings so no `u64` loses precision), per-component counts of valid, explicit
+zero, absent, null, invalid and parent-unavailable claims, record counts, the observed-claim
+counting basis with unresolved duplicate identity, parser rejections, oversized lines, pending
+tails, rejected files, skipped entries and incomplete coverage. A sum of 0, no valid claims,
+no observations and overflow are four distinct displays. It is never merged into the DEMO
+metrics, never a Windows or Computer total, and has no cost, quota or billing figure.
+
+The Rust crate now has one local path dependency (`abf-collection-boundary`, plus its sibling
+`abf-parser`, both std-only); `src-tauri/Cargo.lock` gained exactly those two path packages and
+one dependency edge, edited by hand because the Tauri registry packages are not available
+offline. `tests/fictionalClaude.test.tsx` reads the Rust-generated golden payload
+(`expected-payload.json`, asserted byte-for-byte by the Rust suite). Native Windows compilation
+of the new command, IPC and rendering are NOT_RUN.

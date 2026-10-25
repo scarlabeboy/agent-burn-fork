@@ -727,6 +727,7 @@ fn no_implicit_user_directory_or_process_access_in_source() {
             "claude_summary.rs",
             include_str!("../src/claude_summary.rs"),
         ),
+        ("claude_demo.rs", include_str!("../src/claude_demo.rs")),
         ("identity.rs", include_str!("../src/identity.rs")),
         ("observation.rs", include_str!("../src/observation.rs")),
         ("scope.rs", include_str!("../src/scope.rs")),

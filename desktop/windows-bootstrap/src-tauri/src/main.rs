@@ -5,6 +5,8 @@
 compile_error!("ABF Windows Bootstrap supports Windows x64 only");
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+mod fictional_claude_summary;
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 mod synthetic_snapshot;
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -44,7 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile = runtime_directory()?;
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            synthetic_snapshot::abf_get_synthetic_snapshot
+            synthetic_snapshot::abf_get_synthetic_snapshot,
+            fictional_claude_summary::abf_get_fictional_claude_summary
         ])
         .setup(move |app| {
             tauri::WebviewWindowBuilder::new(

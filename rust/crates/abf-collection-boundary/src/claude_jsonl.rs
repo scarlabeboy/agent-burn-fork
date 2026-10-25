@@ -392,7 +392,26 @@ fn read_lines(
     if hard_link_count(&before) > 1 {
         return Err(ClaudeFileRejection::Path(PathRejection::HardLinked));
     }
+    let scanned = scan_stream(&mut file, resolved.len, limits, parser, record_budget)?;
+    let after = file.metadata().map_err(io)?;
+    if file_object(&after) != resolved.object
+        || after.len() != resolved.len
+        || after.modified().map_err(io)? != resolved.modified
+    {
+        return Err(ClaudeFileRejection::ChangedDuringRead);
+    }
+    Ok(scanned)
+}
 
+// Streams `expected_len` bytes in chunks, splitting on LF with bounded buffering. Reading
+// one byte beyond the expected length detects growth; a short read detects shrinkage.
+fn scan_stream(
+    source: impl Read,
+    expected_len: u64,
+    limits: &ClaudeReadLimits,
+    parser: LongLimits,
+    record_budget: usize,
+) -> Result<Scanned, ClaudeFileRejection> {
     let mut scanned = Scanned {
         lines: Vec::new(),
         counts: ClaudeLineCounts::default(),
@@ -405,18 +424,17 @@ fn read_lines(
         oversized: false,
     };
     let mut chunk = vec![0u8; CHUNK_BYTES];
-    // One byte beyond the recorded length detects growth without reading further.
-    let mut reader = (&mut file).take(resolved.len.saturating_add(1));
+    let mut reader = source.take(expected_len.saturating_add(1));
     let mut total = 0u64;
     loop {
         let read = match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(io(error)),
+            Err(error) => return Err(ClaudeFileRejection::Io(error.kind())),
         };
         total += read as u64;
-        if total > resolved.len {
+        if total > expected_len {
             return Err(ClaudeFileRejection::ChangedDuringRead);
         }
         let mut rest = &chunk[..read];
@@ -442,16 +460,87 @@ fn read_lines(
             }
         }
     }
-    let after = file.metadata().map_err(io)?;
-    if total != resolved.len
-        || file_object(&after) != resolved.object
-        || after.len() != resolved.len
-        || after.modified().map_err(io)? != resolved.modified
-    {
+    if total != expected_len {
         return Err(ClaudeFileRejection::ChangedDuringRead);
     }
     scanned.pending_tail_bytes = state.length;
     Ok(scanned)
+}
+
+/// **Demonstration and test input only.** Runs the same streaming line pipeline over
+/// caller-supplied in-memory fictional "files" and returns a batch labelled
+/// `HostMatch::Simulated`, with no file-object evidence. There is no filesystem, scope, path
+/// or containment check, so this must never stand in for [`collect_claude_jsonl_root`] on real
+/// data. The budgets apply as for a root collection (the batch byte budget also bounds each
+/// file). Files are numbered in the order given.
+pub fn collect_claude_jsonl_memory(
+    environment: EnvironmentIdentity,
+    source: SourceInstance,
+    run: &ScanRun,
+    files: &[&[u8]],
+    limits: ClaudeReadLimits,
+) -> Result<ClaudeBatch, ClaudeCollectError> {
+    if !limits.is_valid() {
+        return Err(ClaudeCollectError::InvalidLimits);
+    }
+    if source.harness() != Harness::ClaudeCode {
+        return Err(ClaudeCollectError::WrongHarness);
+    }
+    if files.len() > limits.max_files {
+        return Err(ClaudeCollectError::FileLimitExceeded);
+    }
+    let parser = LongLimits {
+        record_bytes: limits.max_line_bytes,
+        ..LongLimits::MAX
+    };
+    let mut remaining_bytes = limits.max_total_bytes;
+    let mut remaining_records = limits.max_records;
+    let mut reports = Vec::with_capacity(files.len());
+    for (index, bytes) in files.iter().enumerate() {
+        let file_ordinal =
+            u32::try_from(index).map_err(|_| ClaudeCollectError::FileLimitExceeded)?;
+        let length = bytes.len() as u64;
+        let mut report = ClaudeFileReport {
+            file_ordinal,
+            file_object: FileObjectRef::Unavailable,
+            status: ClaudeFileStatus::Read,
+            lines: Vec::new(),
+            counts: ClaudeLineCounts::default(),
+            pending_tail_bytes: 0,
+        };
+        let outcome = if length > remaining_bytes {
+            Err(ClaudeFileRejection::ByteBudget)
+        } else {
+            remaining_bytes -= length;
+            scan_stream(*bytes, length, &limits, parser, remaining_records)
+        };
+        match outcome {
+            Ok(scanned) => {
+                remaining_records -= scanned.lines.len();
+                report.lines = scanned.lines;
+                report.counts = scanned.counts;
+                report.pending_tail_bytes = scanned.pending_tail_bytes;
+            }
+            Err(rejection) => report.status = ClaudeFileStatus::Rejected(rejection),
+        }
+        reports.push(report);
+    }
+    let incomplete = reports
+        .iter()
+        .any(|file| file.status != ClaudeFileStatus::Read);
+    Ok(ClaudeBatch {
+        scan_run: run.clone(),
+        environment,
+        source,
+        host_match: HostMatch::Simulated,
+        files: reports,
+        skipped: Vec::new(),
+        completeness: if incomplete {
+            Completeness::Incomplete
+        } else {
+            Completeness::Complete
+        },
+    })
 }
 
 fn finish_line(
