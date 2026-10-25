@@ -141,6 +141,7 @@ lower-level counting proof are reused; dependency contracts are unchanged.
 
 NOT_RUN: native Windows/WSL, distribution discovery/startup, real transport,
 filesystem confinement, provider histories, network, production data, persistence,
-restart recovery, full product builds and product presentation. ABF120-F01/F02
-blockers and F03 prerequisite remain unchanged. Synthetic success grants no
+restart recovery, full product builds and product presentation. ABF120 findings are
+dispositioned by Contract A V2 in AGENTS.md (documentation only; no access
+granted). Synthetic success grants no
 production authority or validated native confinement under Contract A or B.

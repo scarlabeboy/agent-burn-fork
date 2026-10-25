@@ -18,10 +18,13 @@ under Deferred.
 **Production reuse: BLOCKED.** Filesystem containment is path-based and
 **not race-free**: under concurrent filesystem changes, data from outside the
 root can be read and emitted (see Known limitations). Production reuse
-stays blocked until handle-relative containment is implemented, tested and
-separately reviewed. There are further production prerequisites: practical
-output memory budgets, a read-coherence strategy and an export/redaction
-policy.
+stays blocked until the production prerequisites below are met and
+separately reviewed. Under Contract A V2 (AGENTS.md) handle-relative
+containment is no longer an absolute prerequisite, but the link/reparse
+no-follow policy, read-coherence behavior and documented residual limits must
+be implemented and tested for the mechanisms actually used. Further production
+prerequisites: practical output memory budgets, a read-coherence strategy and
+an export/redaction policy. This note grants no production access.
 
 ## Build isolation
 
@@ -216,8 +219,9 @@ are never opened.
     `openat` with `O_NOFOLLOW` / `O_DIRECTORY` (and non-blocking opens) on
     Linux, handle-relative opens with reparse-point checks on Windows. That
     requires FFI/`unsafe` or a new dependency, outside the approved M1
-    scope. It is deferred and must be separately implemented, tested and
-    reviewed before any production reuse.
+    scope. Under Contract A V2 it is an optional hardening, not an absolute
+    prerequisite; any production reading mechanism must still be implemented,
+    tested and reviewed for what it actually does.
 - **No practical memory budget for output.**
   - `max_entries` bounds directory iteration only.
   - `max_file_bytes` is a per-file input limit, not a batch memory budget.

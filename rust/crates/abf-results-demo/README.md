@@ -114,9 +114,9 @@ rerun and this demonstration does not independently reprove their contracts.
 NOT_RUN: actual Windows/WSL operations, distribution discovery/startup, native
 filesystem collection or confinement, real transport/cancellation, provider
 histories, credentials, network, persistence/restart, production CLI/app builds,
-publication and release. ABF120-F01/F02 blockers and F03 prerequisite remain
-unchanged. Synthetic results establish no production provenance or native
-confinement under Contract A or B.
+publication and release. ABF120 findings are dispositioned by Contract A V2 in
+AGENTS.md (documentation only; no access granted). Synthetic results establish
+no production provenance or native confinement under Contract A or B.
 
 Recommended next action, not executed: read-only review of this demonstration's
 output and scope against the existing ABF126 presentation contract.

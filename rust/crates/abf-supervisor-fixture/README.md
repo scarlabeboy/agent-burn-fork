@@ -110,5 +110,6 @@ AbandonedWithoutReader, and Cancel with valid/out-of-range barrier_after.
 
 Native Windows/WSL, production data, processes, filesystem security, real clocks,
 real allocator failures, transport, persistence/restart and S5 are NOT_RUN and
-outside scope. ABF120-F01/F02 blockers and F03 prerequisite remain open. Synthetic
+outside scope. ABF120 findings are dispositioned by Contract A V2 in AGENTS.md
+(documentation only; no access granted). Synthetic
 success does not establish native confinement under either Contract A or B.

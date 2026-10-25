@@ -5,7 +5,8 @@ ABF125C aligns the cancellation indicator with effective fictional termination.
 Standalone, unpublished, synchronous, in-memory research fixture. No discovery,
 process launcher, filesystem reader, WSL adapter, network, clocks, Windows APIs,
 UNC access, credentials, persistence or production bridge. It does not establish
-native authorization or physical provenance. ABF120-F01/F02/F03 remain unchanged.
+native authorization or physical provenance. ABF120 findings are dispositioned by Contract A V2 in AGENTS.md
+(documentation only; no access granted).
 
 ## Minimal API and existing contracts
 
