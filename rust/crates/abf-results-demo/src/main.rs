@@ -1,4 +1,4 @@
-//! ABF127 - deterministic presentation of fictional S4/S5 results through ABF126.
+//! ABF130 - fictional file collection and S4/S5 presentation through ABF126.
 #![forbid(unsafe_code)]
 
 use abf_catalog_plan_fixture::*;
@@ -8,6 +8,8 @@ use abf_results_fixture::{Inputs, Results, WindowsSnapshot, present};
 use abf_selected_wsl_fixture::{Delivery, Request, Transport};
 use abf_source_run::*;
 use abf_supervisor_fixture::{Supervisor, SyntheticFacts};
+
+mod fictional_files;
 
 fn windows() -> Supervisor {
     let plan = plan_windows_fixture(
@@ -218,7 +220,7 @@ fn display(title: &str, results: &Results<'_>) {
 }
 
 fn main() {
-    println!("ABF127 - fictional in-memory demonstration");
+    println!("ABF130 - fictional file and in-memory demonstration");
     println!("Synthetic only; provenance=Unattested.");
     println!(
         "Coverage is limited to fictional enumeration; freshness is logical, not measured age."
@@ -308,4 +310,6 @@ fn main() {
         })
         .unwrap(),
     );
+
+    fictional_files::run().expect("disposable fictional-file demonstration");
 }
