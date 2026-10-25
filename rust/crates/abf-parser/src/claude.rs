@@ -4,13 +4,14 @@ use std::fmt;
 
 // Fixed allowlist of usage keys with a token-count meaning; any other `*_tokens` key
 // qualifies the record because a component could be missing from the claims.
-const KNOWN_USAGE_KEYS: [&str; 4] = [
+pub(crate) const KNOWN_USAGE_KEYS: [&str; 4] = [
     "input_tokens",
     "output_tokens",
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
 ];
-const KNOWN_BREAKDOWN_KEYS: [&str; 2] = ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"];
+pub(crate) const KNOWN_BREAKDOWN_KEYS: [&str; 2] =
+    ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"];
 
 /// Claims from one Claude Code JSONL record. Missing fields carry no default; a record
 /// establishes no source completeness, physical event identity or authenticity.
@@ -153,6 +154,48 @@ fn unknown_keys(node: Option<&Node<'_>>, known: &[&str], only_token_keys: bool) 
     }
 }
 
+/// Shared by both parse paths: diagnostics and status from the extracted field states.
+pub(crate) fn finalize(o: &mut ClaudeObservation, unsupported_component: bool) {
+    for field in [
+        &o.session_id,
+        &o.request_id,
+        &o.timestamp,
+        &o.message_id,
+        &o.model,
+    ] {
+        diagnose(field, &mut o.diagnostics);
+    }
+    for field in [&o.message, &o.usage, &o.cache_creation_detail] {
+        diagnose(field, &mut o.diagnostics);
+    }
+    for field in [
+        &o.input,
+        &o.output,
+        &o.cache_read,
+        &o.cache_creation_flat,
+        &o.cache_creation_5m,
+        &o.cache_creation_1h,
+    ] {
+        diagnose(field, &mut o.diagnostics);
+    }
+    if unsupported_component {
+        o.diagnostics.insert(Diagnostic::UnsupportedComponent);
+    }
+    let creation = o.cache_creation();
+    if matches!(creation, Field::OutOfRange) {
+        o.diagnostics.insert(Diagnostic::InvalidField);
+    }
+    let any_valid = [&o.input, &o.output, &o.cache_read, &creation]
+        .iter()
+        .any(|f| matches!(f, Field::Valid(_)));
+    if !any_valid {
+        o.diagnostics.insert(Diagnostic::IncompleteTokens);
+        o.status = Status::Incomplete;
+    } else if o.diagnostics.bits() != 0 {
+        o.status = Status::Qualified;
+    }
+}
+
 fn observe(
     root: &Node<'_>,
     correlation: Option<&str>,
@@ -224,46 +267,11 @@ fn observe(
         o.cache_creation_5m = Field::Unsupported;
         o.cache_creation_1h = Field::Unsupported;
     }
-    for field in [
-        &o.session_id,
-        &o.request_id,
-        &o.timestamp,
-        &o.message_id,
-        &o.model,
-    ] {
-        diagnose(field, &mut o.diagnostics);
-    }
-    for field in [&o.message, &o.usage, &o.cache_creation_detail] {
-        diagnose(field, &mut o.diagnostics);
-    }
-    for field in [
-        &o.input,
-        &o.output,
-        &o.cache_read,
-        &o.cache_creation_flat,
-        &o.cache_creation_5m,
-        &o.cache_creation_1h,
-    ] {
-        diagnose(field, &mut o.diagnostics);
-    }
-    if unknown_keys(usage, &KNOWN_USAGE_KEYS, true)
-        || unknown_keys(detail, &KNOWN_BREAKDOWN_KEYS, false)
-    {
-        o.diagnostics.insert(Diagnostic::UnsupportedComponent);
-    }
-    let creation = o.cache_creation();
-    if matches!(creation, Field::OutOfRange) {
-        o.diagnostics.insert(Diagnostic::InvalidField);
-    }
-    let any_valid = [&o.input, &o.output, &o.cache_read, &creation]
-        .iter()
-        .any(|f| matches!(f, Field::Valid(_)));
-    if !any_valid {
-        o.diagnostics.insert(Diagnostic::IncompleteTokens);
-        o.status = Status::Incomplete;
-    } else if o.diagnostics.bits() != 0 {
-        o.status = Status::Qualified;
-    }
+    finalize(
+        &mut o,
+        unknown_keys(usage, &KNOWN_USAGE_KEYS, true)
+            || unknown_keys(detail, &KNOWN_BREAKDOWN_KEYS, false),
+    );
     Ok(o)
 }
 

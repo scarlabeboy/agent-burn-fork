@@ -157,9 +157,47 @@ other usage keys (`service_tier`, `speed`, ...) are ignored. Status is `Incomple
 without a valid input, output, cache-read or cache-creation claim.
 `Debug` prints field states only, never identifiers, timestamps or counts.
 
-Boundary: real Claude lines often carry large content. A frame over 65,536 bytes, or
-with more than 256 members/elements (content arrays count), is rejected with
-`FrameBudget`/`EntryBudget`, never truncated or treated as zero. Splitting lines,
-detecting oversize lines without buffering them, and any content-skipping scanner or
-larger ceiling belong to a future collector gate. Equal bytes or equal claims imply no
-event identity; source-local deduplication rules are not implemented here.
+`parse_claude` keeps the 65,536-byte / 256-entry tree budget: a larger frame is rejected
+with `FrameBudget`/`EntryBudget`, never truncated or treated as zero. Equal bytes or equal
+claims imply no event identity; source-local deduplication is not implemented here.
+
+### Long records (ABF134C): `parse_claude_long`
+
+`parse_claude_long(record, correlation, LongLimits) -> ClaudeParseResult` yields the same
+`ClaudeObservation` (field states, diagnostics, cache-creation rules, redacted `Debug`) for
+records with large message content. It scans the borrowed record once, with no tree:
+skipped values are validated and dropped as read, so heap use is bounded by the retained
+strings (each at most 256 decoded bytes, decoded incrementally with no allocation sized from
+the input) and 64-byte key candidates, not by the record. `tests/claude_long_memory.rs`
+measures this with a counting allocator (a 5 MB record peaks at the same few hundred bytes
+as a 1 KB record, asserted below 4,096).
+
+| `LongLimits::MAX` | Value | Rejection code |
+| --- | --- | --- |
+| `record_bytes` | 8 MiB, checked before UTF-8/JSON decoding | `FrameBudget` |
+| `depth` (root object = 1) | 32, so recursion is bounded | `DepthBudget` |
+| `entries` (all members and array elements, skipped or not) | 1,048,576 | `EntryBudget` |
+| `string_bytes` (each retained string, correlation) | 256 decoded bytes | `StringBudget` |
+| `result_bytes` | 4,096 | `ResultBudget` |
+
+Callers may lower, never raise (`InvalidLimits`). Work is O(record bytes) plus O(entries).
+Guarantees: the whole record is checked as UTF-8 and JSON (grammar, escapes and surrogates,
+control characters, number syntax, trailing data), including skipped content. Duplicate keys
+are rejected in the root, `message`, `message.usage` and `usage.cache_creation` objects, i.e.
+wherever they could change a retained claim (escaped spellings match). **Not** guaranteed:
+duplicate keys inside skipped values (content, tool data, unknown objects) are not detected,
+since that needs memory proportional to the skipped object; the tree parser does reject them.
+A key longer than 64 decoded bytes cannot match a claim; inside `usage` it is treated as an
+unclassifiable component and qualifies the record. Results equal `parse_claude` on records
+within its budget, apart from that gap (differential test).
+
+### Framing contract for the future collector
+
+Neither parser reads files or splits lines. The collector must: split on LF (0x0A) only,
+passing one record per call (a trailing CR is JSON whitespace); read at most
+`record_bytes + 1` bytes of a line and, if no LF appears by then, count the line as oversized
+and discard up to the next LF without buffering it; never pass a final non-LF-terminated tail
+as a record, but report it as pending (an incomplete tail is rejected `IncompleteJson` if
+passed); count blank lines, oversized lines and every `Rejected` code as explicit outcomes,
+never as zero usage; and keep the parser's `Rejected` and `Incomplete` results visible.
+No framing helper is provided: it would only duplicate this contract without file reads.

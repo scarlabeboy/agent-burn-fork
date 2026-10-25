@@ -2,8 +2,10 @@
 #![forbid(unsafe_code)]
 
 mod claude;
+mod claude_long;
 mod opencode;
 pub use claude::{ClaudeObservation, ClaudeParseResult, parse_claude};
+pub use claude_long::{LongLimits, parse_claude_long};
 pub use opencode::parse;
 
 /// Callers may lower, but never raise, the experimental hard ceilings.
