@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createElement } from 'react';
+import { Children, createElement, isValidElement } from 'react';
+import type { ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createSyntheticBridge, isSyntheticSnapshot, syntheticBridge } from '../frontend/src/syntheticBridge.ts';
 import type { BridgeState } from '../frontend/src/syntheticBridge.ts';
@@ -18,6 +20,7 @@ import {
 } from '../frontend/src/selection.ts';
 import type { Selection } from '../frontend/src/selection.ts';
 import { environments, harnesses } from '../frontend/src/synthetic.ts';
+import { fictionalResultsSnapshot } from '../frontend/src/fictionalResultsSnapshot.ts';
 
 import { snapshot, expectedViews } from './syntheticFixture.ts';
 
@@ -39,6 +42,63 @@ const buttons = (html: string) =>
 const allSelections: Selection[] = environments.flatMap((environment) =>
   harnesses.map((harness) => ({ environment: environment.id, harness: harness.id })),
 );
+
+test('fixed fictional results are collapsed by default in a labeled keyboard-accessible panel', () => {
+  const html = render();
+  assert.match(html, /Fixed fictional results - demonstration only/u);
+  assert.match(html, /<details><summary>Show captured results and coverage<\/summary>/u);
+  assert.doesNotMatch(html, /<details[^>]*\bopen(?:\s|=|>)/u);
+  assert.match(html, /<pre class="fictional-results" tabindex="0" role="region" aria-label="Fixed fictional collection output">/u);
+  assert.match(html, /Reported claim sums, not deduplicated usage/u);
+  assert.match(html, /All scenarios are fixed and independent of the selected environment and harness/u);
+});
+
+test('fixed snapshot renders verbatim as text in every selection with its recorded SHA-256', () => {
+  assert.equal(createHash('sha256').update(fictionalResultsSnapshot, 'utf8').digest('hex'),
+    '11d70e3068f694e66a1aa35a49ffb50fb1c2b87aa8a0a986da39e5b8b39901e0');
+  assert.equal(Buffer.byteLength(fictionalResultsSnapshot, 'utf8'), 11946);
+  const escaped = fictionalResultsSnapshot.replace(/&/gu, '&amp;').replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;').replace(/"/gu, '&quot;').replace(/'/gu, '&#x27;');
+  for (const selection of allSelections) {
+    const html = renderSelection(selection);
+    const content = html.match(/<pre\b[^>]*class="fictional-results"[^>]*>([\s\S]*?)<\/pre>/u)?.[1];
+    assert.equal(content, escaped);
+  }
+});
+
+test('fixed snapshot retains coverage, rejected inputs and freshness limits without raw payloads', () => {
+  assert.equal([...fictionalResultsSnapshot.matchAll(/^== /gmu)].length, 9);
+  assert.match(fictionalResultsSnapshot, /Synthetic only; provenance=Unattested\./u);
+  assert.match(fictionalResultsSnapshot, /freshness is logical, not measured age/u);
+  assert.match(fictionalResultsSnapshot, /No combined total, shared catalog authority or overall collection verdict/u);
+  assert.match(fictionalResultsSnapshot, /stored_occurrences=2 input_tokens=ReportedClaimSum\(74\) output_tokens=ReportedClaimSum\(10\) total_tokens=NoValidClaims/u);
+  assert.match(fictionalResultsSnapshot, /Rejected\(NotSyntheticFixture\)/u);
+  assert.match(fictionalResultsSnapshot, /coverage=InventoryIncomplete/u);
+  assert.match(fictionalResultsSnapshot, /skip=DepthLimit/u);
+  assert.match(fictionalResultsSnapshot, /coverage=PartiallyCovered/u);
+  assert.match(fictionalResultsSnapshot, /record_error=ProhibitedField\(Content\)/u);
+  assert.match(fictionalResultsSnapshot, /pending_tail_bytes=17/u);
+  assert.match(fictionalResultsSnapshot, /input_tokens=ReportedClaimSum\(9\) output_tokens=NoValidClaims total_tokens=ReportedClaimSum\(12\)/u);
+  assert.doesNotMatch(fictionalResultsSnapshot, /SENTINEL|9999|"tokens"|C:\\|\/home\/|\/tmp\//u);
+});
+
+test('fictional disclosure has no event handlers or deferred content requests', () => {
+  const disclosures: ReactNode[] = [];
+  const find = (node: ReactNode): void => {
+    if (!isValidElement<{ children?: ReactNode }>(node)) return;
+    if (node.type === 'details') disclosures.push(node);
+    Children.forEach(node.props.children, find);
+  };
+  find(ShellView({ selection: initialSelection, onSelectEnvironment: noop, onSelectHarness: noop }));
+  assert.equal(disclosures.length, 1);
+  const inspect = (node: ReactNode): void => {
+    if (!isValidElement<{ children?: ReactNode }>(node)) return;
+    assert.equal(typeof node.type, 'string', 'disclosure contains only native elements and static text');
+    assert.doesNotMatch(Object.keys(node.props).join(' '), /\bon[A-Z]|\bref\b|dangerouslySetInnerHTML/u);
+    Children.forEach(node.props.children, inspect);
+  };
+  inspect(disclosures[0]);
+});
 
 test('defines three distinct environments and Computer as the only derived view', () => {
   assert.deepEqual(environments.map((entry) => entry.id), ['windows', 'selected-wsl', 'computer']);
@@ -100,9 +160,10 @@ test('harness buttons mark only the selected harness as the current page', () =>
   }
 });
 
-test('the only controls are the seven native selection buttons', () => {
+test('the shell has seven selection buttons and one native fictional disclosure', () => {
   const html = render();
   assert.equal(buttons(html).length, environments.length + harnesses.length);
+  assert.equal([...html.matchAll(/<summary>/gu)].length, 1);
   assert.doesNotMatch(html, /<(?:input|select|textarea|form|a|iframe|img|script|link|object|embed)\b|(?:href|src)=|\sstyle=/u);
   assert.doesNotMatch(textOf(html), /\b(?:refresh|settings|log ?in|sign ?in|filter|connect now|start)\b/iu);
 });
@@ -155,7 +216,8 @@ test('quota panel titles are h3 headings directly below the h2 quota section hea
 test('every view shows explicit unavailable states and invents no measurements', () => {
   for (const selection of allSelections) {
     const html = renderSelection(selection);
-    const text = textOf(html).replace(/5-hour/gu, '');
+    // The separate fixed capture contains fictional numbers; the shell still has no observed usage.
+    const text = textOf(html.replace(/<pre\b[^>]*class="fictional-results"[^>]*>[\s\S]*?<\/pre>/u, '')).replace(/5-hour/gu, '');
     assert.doesNotMatch(text, /[0-9$€£%]/u, `${pageHeading(selection)} must not contain numbers or currency`);
     assert.doesNotMatch(text, /last updated|observed zero|tokens used|quota remaining|resets? (?:in|at)\b/iu);
     assert.match(text, /DEMO \/ SYNTHETIC — collection disabled/u);

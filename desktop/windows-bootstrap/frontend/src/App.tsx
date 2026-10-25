@@ -6,6 +6,7 @@ import { environmentOf, harnessOf, initialSelection, pageHeading, selectEnvironm
 import type { Selection } from './selection.ts';
 import { environments, harnesses, shellText, unavailable } from './synthetic.ts';
 import type { EnvironmentId, HarnessId, QuotaPanelDefinition } from './synthetic.ts';
+import { fictionalResultsSnapshot } from './fictionalResultsSnapshot.ts';
 
 const metricLabels = Object.freeze(['Tokens', 'Estimated API cost', 'Sessions', 'Models'] as const);
 
@@ -129,6 +130,16 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
             </article>
           ))}
         </section>
+
+        <Region id="fictional-results" title="Fixed fictional results - demonstration only">
+          <p className="page-note">Captured from fixed fictional fixtures. Reported claim sums, not deduplicated usage.
+            All scenarios are fixed and independent of the selected environment and harness.
+            Freshness is logical, not measured age. No real account data is shown.</p>
+          <details>
+            <summary>Show captured results and coverage</summary>
+            <pre className="fictional-results" tabIndex={0} role="region" aria-label="Fixed fictional collection output">{fictionalResultsSnapshot}</pre>
+          </details>
+        </Region>
 
         {isGeneral ? null : (
           <section className="quotas" aria-labelledby="quota-section-title">
