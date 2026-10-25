@@ -299,3 +299,37 @@ These tests do not prove a coherent snapshot, bounded wall time or production
 readiness. Path swaps can still redirect a standard path-based open; replacing a
 file with a FIFO can still block it. Locality checks reject explicit UNC/device
 inputs, not every remotely backed filesystem before contact.
+
+## Claude-shaped JSONL collection (ABF134D, fictional trees only)
+
+`claude_jsonl::collect_claude_jsonl_root(scope, run, ClaudeReadLimits)` reads `*.jsonl`
+files below an explicit `AuthorizedRoot` (source harness must be `ClaudeCode`) and hands each
+LF-terminated line to `abf_parser::parse_claude_long`. It adds one sibling dependency,
+`abf-parser`, and a small extension-parameterized enumeration/resolution in `scope.rs`; the
+`.abf-fixture` path and its tests are unchanged. Tested only on disposable fictional trees under
+`target/`; never run on provider histories, with no discovery, deduplication or persistence.
+
+- **Result:** `ClaudeBatch` with per-file reports identified by sorted ordinal (no paths, no
+  names, no content), file-object evidence, retained `ClaudeLine`s (line ordinal, byte offset
+  and length, and an allowlisted `ClaudeObservation`, a parser rejection code, or `Oversized`),
+  separate counts for observations, rejected, oversized and blank lines, and
+  `pending_tail_bytes`. `observations()` yields claims with their full synthetic provenance;
+  `totals()` sums the counts. Skipped entries keep only their reason.
+- **Framing:** only complete LF-terminated lines are parsed; a tail without LF is counted, never
+  parsed. Blank lines are counted, not retained. Lines are streamed in 64 KiB chunks; a line over
+  `max_line_bytes` (ceiling 8 MiB) is discarded as it streams and reported `Oversized`, so
+  buffering is bounded by the line limit, not the file size (allocation-tracked test).
+- **Budgets (explicit, coded rejections, nothing truncated or zeroed):** scope depth and
+  directory entries (`CollectionLimits`), per-file bytes (`max_file_bytes`), and
+  `ClaudeReadLimits`: files (more candidates fail the batch, no subset), bytes per batch, line
+  length, retained outcomes (exhaustion rejects the affected file as `OutputLimit`).
+- **Refusals:** symlinks and detected reparse points (skipped), hard links and entries that
+  stop being safe regular files (file `Rejected`), traversal and non-UTF-8 names. All keep the
+  batch `Incomplete`. Wrong-extension files are out of scope, not incomplete.
+- **Change detection:** identity, length and modification time are compared before, during and
+  after the read; any change rejects the whole file as `ChangedDuringRead` and emits nothing from
+  it. A live, growing file is therefore reported, not partially accepted; retry policy belongs to
+  a later supervisor. Not a coherent snapshot: rewrites preserving the checked metadata, and swaps
+  between a path check and the open, are not detected (Contract A V2 limits; path-based).
+- **Completeness** is traversal and read coverage only. Rejected, oversized and blank lines and
+  pending tails leave it `Complete` and must never be read as zero usage.

@@ -16,18 +16,28 @@
 //! - a synthetic-only ingestion path ([`synthetic`]) over a documented fixture
 //!   format.
 //!
-//! It is **not** a Claude Code, Codex or OpenCode parser, performs no
+//! [`claude_jsonl`] adds a fictional Claude-shaped JSONL path (ABF134D) that delegates line
+//! parsing to `abf-parser`.
+//!
+//! It is **not** a Codex or OpenCode parser, performs no
 //! deduplication or canonicalization, and never discovers user directories
 //! on its own. It is meant for small, stable, trusted synthetic fixtures. See
 //! `README.md` for the contract, known limitations and deferred work.
 
 #![forbid(unsafe_code)]
 
+pub mod claude_jsonl;
 pub mod identity;
 pub mod observation;
 pub mod scope;
 pub mod synthetic;
 
+pub use claude_jsonl::{
+    CLAUDE_EXTENSION, ClaudeBatch, ClaudeCollectError, ClaudeFileRejection, ClaudeFileReport,
+    ClaudeFileStatus, ClaudeLine, ClaudeLineCounts, ClaudeLineOutcome, ClaudeReadLimits,
+    ClaudeRecordRef, ClaudeTotals, MAX_FILES_CEILING, MAX_LINE_BYTES_CEILING, MAX_RECORDS_CEILING,
+    MAX_TOTAL_BYTES_CEILING, collect_claude_jsonl_root,
+};
 pub use identity::{
     EnvironmentIdentity, EnvironmentInstance, EnvironmentKind, Harness, IdentityError, OpaqueId,
     SourceInstance, WslDistroName,

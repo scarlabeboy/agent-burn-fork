@@ -402,7 +402,16 @@ impl CollectionScope {
         &self,
         relative: &str,
     ) -> Result<ResolvedFile, PathRejection> {
-        let components = validate_relative(relative, self.limits.max_depth)?;
+        self.resolve_regular_file_with(relative, FIXTURE_EXTENSION)
+    }
+
+    /// Same checks as [`Self::resolve_regular_file`] for another source file extension.
+    pub(crate) fn resolve_regular_file_with(
+        &self,
+        relative: &str,
+        extension: &str,
+    ) -> Result<ResolvedFile, PathRejection> {
+        let components = validate_relative(relative, self.limits.max_depth, extension)?;
         let (last, directories) = components
             .split_last()
             .expect("validated relative path is non-empty");
@@ -448,6 +457,13 @@ impl CollectionScope {
     /// that would depend on directory iteration order. This bounds traversal
     /// only, not the memory of records later read from the candidates.
     pub(crate) fn enumerate(&self) -> Result<Enumeration, CollectError> {
+        self.enumerate_with(FIXTURE_EXTENSION)
+    }
+
+    /// Same walk as [`Self::enumerate`] for another source file extension. Files with a
+    /// different extension are skipped as `SkipReason::NotFixtureExtension`, i.e. "not the
+    /// requested extension" (out of scope, not incomplete).
+    pub(crate) fn enumerate_with(&self, extension: &str) -> Result<Enumeration, CollectError> {
         let mut enumeration = Enumeration::default();
         let mut pending = vec![(self.root.path.clone(), String::new(), 0usize)];
         let mut budget = self.limits.max_entries;
@@ -504,7 +520,7 @@ impl CollectionScope {
                     }
                 } else if !metadata.is_file() {
                     enumeration.skip(Some(relative), SkipReason::NotRegularFile);
-                } else if has_fixture_extension(name) {
+                } else if has_extension(name, extension) {
                     enumeration.candidates.push(relative);
                 } else {
                     enumeration.skip(Some(relative), SkipReason::NotFixtureExtension);
@@ -570,7 +586,11 @@ fn validate_component(component: &str) -> Result<(), PathRejection> {
     }
 }
 
-fn validate_relative(relative: &str, max_depth: usize) -> Result<Vec<&str>, PathRejection> {
+fn validate_relative<'a>(
+    relative: &'a str,
+    max_depth: usize,
+    extension: &str,
+) -> Result<Vec<&'a str>, PathRejection> {
     if relative.is_empty() {
         return Err(PathRejection::Empty);
     }
@@ -590,14 +610,14 @@ fn validate_relative(relative: &str, max_depth: usize) -> Result<Vec<&str>, Path
     let last = components
         .last()
         .expect("split yields at least one component");
-    if !has_fixture_extension(last) {
+    if !has_extension(last, extension) {
         return Err(PathRejection::NotFixtureExtension);
     }
     Ok(components)
 }
 
-fn has_fixture_extension(name: &str) -> bool {
-    name.len() > FIXTURE_EXTENSION.len() && name.ends_with(FIXTURE_EXTENSION)
+fn has_extension(name: &str, extension: &str) -> bool {
+    name.len() > extension.len() && name.ends_with(extension)
 }
 
 #[cfg(unix)]

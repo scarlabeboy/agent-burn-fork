@@ -5,9 +5,10 @@ edition = "2024"
 publish = false
 description = "ABF M1: explicit, metadata-only collection boundary with a synthetic fixture ingestion path"
 
-# Deliberately std-only: the boundary must build offline without the upstream
-# workspace, its build scripts, or any registry access.
+# No registry packages: the boundary must build offline without the upstream workspace or
+# its build scripts. The only dependency is the sibling std-only parser (ABF134D).
 [dependencies]
+abf-parser = { path = "../abf-parser" }
 
 # Standalone workspace root so this crate never re-resolves the upstream
 # `rust/Cargo.lock`. Joining the upstream workspace is a later, reviewed change.
