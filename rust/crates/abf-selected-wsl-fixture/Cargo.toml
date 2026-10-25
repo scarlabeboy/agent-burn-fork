@@ -1,0 +1,14 @@
+[package]
+name = "abf-selected-wsl-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = false
+autobins = false
+
+[workspace]
+
+[dependencies]
+abf-collection-boundary = { path = "../abf-collection-boundary", version = "=0.0.0" }
+abf-reader-fixture = { path = "../abf-reader-fixture", version = "=0.1.0" }
+abf-source-run = { path = "../abf-source-run", version = "=0.1.0" }
