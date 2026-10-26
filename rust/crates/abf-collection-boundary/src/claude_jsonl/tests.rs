@@ -37,6 +37,56 @@ impl Drop for Dir {
 
 const LINE: &str = "{\"message\":{\"usage\":{\"input_tokens\":1}}}\n";
 
+#[test]
+fn repeated_interruptions_stop_with_a_coded_io_failure() {
+    struct Interrupted(usize);
+    impl Read for Interrupted {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            self.0 += 1;
+            assert!(self.0 <= 9, "unbounded interrupted-read retries");
+            Err(io::ErrorKind::Interrupted.into())
+        }
+    }
+    let result = scan_stream(
+        Interrupted(0),
+        1,
+        &ClaudeReadLimits::default(),
+        LongLimits::MAX,
+        1,
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        ClaudeFileRejection::Io(io::ErrorKind::Interrupted)
+    );
+}
+
+#[test]
+fn a_transient_interruption_is_retried() {
+    struct Once(bool);
+    impl Read for Once {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.0 {
+                self.0 = true;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            buffer[0] = b'\n';
+            Ok(1)
+        }
+    }
+    // The stream deliberately grows after one byte: the retry must reach growth detection.
+    assert_eq!(
+        scan_stream(
+            Once(false),
+            1,
+            &ClaudeReadLimits::default(),
+            LongLimits::MAX,
+            1
+        )
+        .unwrap_err(),
+        ClaudeFileRejection::ChangedDuringRead
+    );
+}
+
 fn scope(dir: &Dir) -> CollectionScope {
     let id = |v: &str| OpaqueId::new(v).unwrap();
     CollectionScope::new(

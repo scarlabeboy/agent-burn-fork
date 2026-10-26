@@ -82,6 +82,220 @@ fn text(content: &str) -> String {
 }
 
 #[test]
+fn single_file_preserves_the_root_pipeline_without_enumerating_siblings() {
+    let tree = Tree::new();
+    let line = record("single", r#"{"input_tokens":0,"output_tokens":null}"#, "[]");
+    tree.write(
+        "chosen.jsonl",
+        format!("{line}\n{{\"message\":\nunfinished"),
+    );
+    let scope = scope(&tree);
+    let expected = default(&scope);
+    assert_eq!(expected.totals().counts.rejected, 1);
+    assert_eq!(expected.totals().pending_tail_bytes, 10);
+    assert_eq!(
+        expected.observations().next().unwrap().observation.input,
+        Field::Valid(0)
+    );
+    assert_eq!(
+        expected.observations().next().unwrap().observation.output,
+        Field::Null
+    );
+    tree.write("sibling.jsonl", "not JSON\n");
+    let scope = scope
+        .with_limits(CollectionLimits {
+            max_entries: 1,
+            ..CollectionLimits::default()
+        })
+        .unwrap();
+    let actual =
+        collect_claude_jsonl_file(&scope, &run(), "chosen.jsonl", ClaudeReadLimits::default())
+            .unwrap();
+    assert_eq!(actual.summary(), expected.summary());
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn single_file_rejects_missing_paths_wrong_extensions_and_directories() {
+    let tree = Tree::new();
+    tree.write("wrong.txt", "{}\n");
+    fs::create_dir(tree.0.join("directory.jsonl")).unwrap();
+    for relative in [
+        "missing.jsonl",
+        "wrong.txt",
+        "directory.jsonl",
+        "../outside.jsonl",
+        "/absolute.jsonl",
+        "a//b.jsonl",
+        "a\\b.jsonl",
+        "C:stream.jsonl",
+    ] {
+        let batch =
+            collect_claude_jsonl_file(&scope(&tree), &run(), relative, ClaudeReadLimits::default())
+                .unwrap();
+        assert!(
+            matches!(
+                batch.files[0].status,
+                ClaudeFileStatus::Rejected(ClaudeFileRejection::Path(_))
+            ),
+            "{relative}"
+        );
+        assert_eq!(batch.completeness, Completeness::Incomplete);
+        assert_eq!(batch.files[0].counts, ClaudeLineCounts::default());
+        assert!(batch.files[0].lines.is_empty());
+        assert_eq!(batch.files[0].pending_tail_bytes, 0);
+        assert!(batch.summary().caveats.rejected_files);
+    }
+    let missing = collect_claude_jsonl_file(
+        &scope(&tree),
+        &run(),
+        "missing.jsonl",
+        ClaudeReadLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        missing.files[0].status,
+        ClaudeFileStatus::Rejected(ClaudeFileRejection::Path(PathRejection::Io(
+            std::io::ErrorKind::NotFound
+        )))
+    );
+}
+
+#[test]
+fn single_file_enforces_file_byte_and_retained_outcome_limits() {
+    let tree = Tree::new();
+    let line = format!("{}\n", record("limit", FLAT, "[]"));
+    let bytes = line.len() as u64;
+    tree.write("a.jsonl", &line);
+    let scope = scope(&tree)
+        .with_limits(CollectionLimits {
+            max_file_bytes: bytes,
+            ..CollectionLimits::default()
+        })
+        .unwrap();
+    let exact = ClaudeReadLimits {
+        max_total_bytes: bytes,
+        max_records: 1,
+        max_line_bytes: line.len() - 1,
+        ..ClaudeReadLimits::default()
+    };
+    let batch = collect_claude_jsonl_file(&scope, &run(), "a.jsonl", exact).unwrap();
+    assert_eq!(batch.totals().counts.observations, 1);
+    let byte_limited = collect_claude_jsonl_file(
+        &scope,
+        &run(),
+        "a.jsonl",
+        ClaudeReadLimits {
+            max_total_bytes: bytes - 1,
+            ..exact
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        byte_limited.files[0].status,
+        ClaudeFileStatus::Rejected(ClaudeFileRejection::ByteBudget)
+    );
+    tree.write("a.jsonl", format!("{line}\n"));
+    let too_large = collect_claude_jsonl_file(&scope, &run(), "a.jsonl", exact).unwrap();
+    assert_eq!(
+        too_large.files[0].status,
+        ClaudeFileStatus::Rejected(ClaudeFileRejection::TooLarge)
+    );
+    tree.write("a.jsonl", "{}\nnot-json\n");
+    let output_limited = collect_claude_jsonl_file(&scope, &run(), "a.jsonl", exact).unwrap();
+    assert_eq!(
+        output_limited.files[0].status,
+        ClaudeFileStatus::Rejected(ClaudeFileRejection::OutputLimit)
+    );
+    assert!(output_limited.files[0].lines.is_empty());
+    assert_eq!(output_limited.files[0].counts, ClaudeLineCounts::default());
+    assert_eq!(output_limited.completeness, Completeness::Incomplete);
+}
+
+#[test]
+fn single_file_line_limit_reports_oversized_records_and_unparsed_tails() {
+    let tree = Tree::new();
+    tree.write("a.jsonl", "123456\n123456");
+    let batch = collect_claude_jsonl_file(
+        &scope(&tree),
+        &run(),
+        "a.jsonl",
+        ClaudeReadLimits {
+            max_line_bytes: 5,
+            ..ClaudeReadLimits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(batch.files[0].status, ClaudeFileStatus::Read);
+    assert_eq!(
+        batch.files[0].lines[0].outcome,
+        ClaudeLineOutcome::Oversized
+    );
+    assert_eq!(batch.files[0].lines[0].byte_length, 6);
+    assert_eq!(batch.files[0].pending_tail_bytes, 6);
+    assert!(batch.summary().caveats.unparsed_lines);
+    assert!(batch.summary().caveats.pending_tails);
+}
+
+#[test]
+fn single_file_rejects_invalid_limits_wrong_harness_and_changed_root() {
+    let tree = Tree::new();
+    let scope = scope(&tree);
+    assert_eq!(
+        collect_claude_jsonl_file(
+            &scope,
+            &run(),
+            "a.jsonl",
+            ClaudeReadLimits {
+                max_records: 0,
+                ..ClaudeReadLimits::default()
+            }
+        )
+        .unwrap_err(),
+        ClaudeCollectError::InvalidLimits
+    );
+    assert_eq!(
+        collect_claude_jsonl_file(
+            &scope_at(&tree.0, Harness::Codex),
+            &run(),
+            "a.jsonl",
+            ClaudeReadLimits::default()
+        )
+        .unwrap_err(),
+        ClaudeCollectError::WrongHarness
+    );
+    fs::remove_dir(&tree.0).unwrap();
+    assert!(matches!(
+        collect_claude_jsonl_file(&scope, &run(), "a.jsonl", ClaudeReadLimits::default()),
+        Err(ClaudeCollectError::Boundary(CollectError::RootChanged(_)))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn single_file_rejects_detected_links_and_linked_parents() {
+    let tree = Tree::new();
+    tree.write("real.jsonl", "{}\n");
+    std::os::unix::fs::symlink(tree.0.join("real.jsonl"), tree.0.join("link.jsonl")).unwrap();
+    std::os::unix::fs::symlink(&tree.0, tree.0.join("parent")).unwrap();
+    fs::hard_link(tree.0.join("real.jsonl"), tree.0.join("hard.jsonl")).unwrap();
+    for (path, reason) in [
+        ("link.jsonl", PathRejection::Symlink),
+        ("parent/real.jsonl", PathRejection::SymlinkComponent),
+        ("hard.jsonl", PathRejection::HardLinked),
+    ] {
+        let batch =
+            collect_claude_jsonl_file(&scope(&tree), &run(), path, ClaudeReadLimits::default())
+                .unwrap();
+        assert_eq!(
+            batch.files[0].status,
+            ClaudeFileStatus::Rejected(ClaudeFileRejection::Path(reason))
+        );
+        assert!(batch.files[0].lines.is_empty());
+    }
+}
+
+#[test]
 fn multiple_files_yield_claims_provenance_and_counts() {
     let tree = Tree::new();
     let long = text(&format!("{SENTINEL} {}", "long ".repeat(60_000)));

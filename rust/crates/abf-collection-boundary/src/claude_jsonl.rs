@@ -1,6 +1,6 @@
 //! Claude-shaped JSONL collection below an explicit, caller-authorized root (ABF134D).
 //!
-//! Reads `*.jsonl` files recursively below the scope root, splits them into LF-terminated
+//! Reads one selected `*.jsonl` file or files recursively below the scope root, splits them into LF-terminated
 //! lines with bounded buffering and hands each line to
 //! [`abf_parser::parse_claude_long`]. Only allowlisted parser claims, line outcomes and
 //! synthetic provenance are returned. Message content is never retained, and no path appears
@@ -21,6 +21,8 @@
 //!   growth, shrinkage or a metadata change rejects the whole file as `ChangedDuringRead` and
 //!   emits nothing from it. This is not a coherent snapshot: rewrites that preserve the
 //!   checked metadata are not detected.
+//!   At most eight interrupted-read retries are allowed per file; exhaustion is reported as
+//!   `Io(Interrupted)`. Blocking filesystem calls themselves have no wall-time deadline.
 //! - **Framing:** a record is a complete LF-terminated line. Trailing bytes without a final
 //!   LF are counted in `pending_tail_bytes` and never parsed. Whitespace-only lines are
 //!   counted as blank. A trailing CR is JSON whitespace.
@@ -157,7 +159,8 @@ pub struct ClaudeLineCounts {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ClaudeFileReport {
-    /// Position in the sorted candidate list; the only file identifier in a result.
+    /// Position in the sorted candidate list (0 for a single-file call); the only file
+    /// identifier in a result.
     pub file_ordinal: u32,
     pub file_object: FileObjectRef,
     pub status: ClaudeFileStatus,
@@ -168,7 +171,7 @@ pub struct ClaudeFileReport {
     pub pending_tail_bytes: u64,
 }
 
-/// Result of one root collection. Independent of every other batch; nothing merges them.
+/// Result of one collection. Independent of every other batch; nothing merges them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ClaudeBatch {
@@ -277,10 +280,6 @@ pub fn collect_claude_jsonl_root(
     if enumeration.candidates.len() > limits.max_files {
         return Err(ClaudeCollectError::FileLimitExceeded);
     }
-    let parser = LongLimits {
-        record_bytes: limits.max_line_bytes,
-        ..LongLimits::MAX
-    };
     let mut remaining_bytes = limits.max_total_bytes;
     let mut remaining_records = limits.max_records;
     let mut files = Vec::with_capacity(enumeration.candidates.len());
@@ -288,39 +287,14 @@ pub fn collect_claude_jsonl_root(
         let file_ordinal =
             u32::try_from(index).map_err(|_| ClaudeCollectError::FileLimitExceeded)?;
         revalidate()?;
-        let mut report = ClaudeFileReport {
+        let report = collect_file_report(
+            scope,
+            relative,
             file_ordinal,
-            file_object: FileObjectRef::Unavailable,
-            status: ClaudeFileStatus::Read,
-            lines: Vec::new(),
-            counts: ClaudeLineCounts::default(),
-            pending_tail_bytes: 0,
-        };
-        match scope.resolve_regular_file_with(relative, CLAUDE_EXTENSION) {
-            Err(rejection) => {
-                report.status = ClaudeFileStatus::Rejected(ClaudeFileRejection::Path(rejection));
-            }
-            Ok(resolved) => {
-                report.file_object = resolved.object;
-                let outcome = if resolved.len > scope.limits().max_file_bytes {
-                    Err(ClaudeFileRejection::TooLarge)
-                } else if resolved.len > remaining_bytes {
-                    Err(ClaudeFileRejection::ByteBudget)
-                } else {
-                    remaining_bytes -= resolved.len;
-                    read_lines(&resolved, &limits, parser, remaining_records)
-                };
-                match outcome {
-                    Ok(scanned) => {
-                        remaining_records -= scanned.lines.len();
-                        report.lines = scanned.lines;
-                        report.counts = scanned.counts;
-                        report.pending_tail_bytes = scanned.pending_tail_bytes;
-                    }
-                    Err(rejection) => report.status = ClaudeFileStatus::Rejected(rejection),
-                }
-            }
-        }
+            &limits,
+            &mut remaining_bytes,
+            &mut remaining_records,
+        );
         revalidate()?;
         files.push(report);
     }
@@ -351,6 +325,115 @@ pub fn collect_claude_jsonl_root(
             Completeness::Complete
         },
     })
+}
+
+/// Collects exactly one caller-selected relative `*.jsonl` file, without enumeration or
+/// discovery. The explicit authorized root and per-file byte/depth limits come from `scope`.
+/// Uses the same reader, parser, provenance and summary as the root API. File ordinal is 0;
+/// no path is retained. Path and file failures yield an incomplete batch with one rejected
+/// file and no records. Invalid limits, a wrong harness or root revalidation failure return
+/// `Err`. Completeness covers only this requested file, not any sibling or usage coverage.
+/// All `ClaudeReadLimits` fields must be valid; `max_files` always admits this one file.
+/// The scope's directory-entry limit is unused because this call does not enumerate.
+///
+/// Like the root API, validated only on fictional files. Path-based checks are non-atomic;
+/// filesystem calls have no wall-time deadline and same-metadata rewrites are not detected.
+pub fn collect_claude_jsonl_file(
+    scope: &CollectionScope,
+    run: &ScanRun,
+    relative: &str,
+    limits: ClaudeReadLimits,
+) -> Result<ClaudeBatch, ClaudeCollectError> {
+    if !limits.is_valid() {
+        return Err(ClaudeCollectError::InvalidLimits);
+    }
+    if scope.source().harness() != Harness::ClaudeCode {
+        return Err(ClaudeCollectError::WrongHarness);
+    }
+    let revalidate = || {
+        scope
+            .root()
+            .revalidate()
+            .map_err(|reason| ClaudeCollectError::Boundary(CollectError::RootChanged(reason)))
+    };
+    revalidate()?;
+    let mut remaining_bytes = limits.max_total_bytes;
+    let mut remaining_records = limits.max_records;
+    let report = collect_file_report(
+        scope,
+        relative,
+        0,
+        &limits,
+        &mut remaining_bytes,
+        &mut remaining_records,
+    );
+    revalidate()?;
+    let completeness = if report.status == ClaudeFileStatus::Read {
+        Completeness::Complete
+    } else {
+        Completeness::Incomplete
+    };
+    Ok(ClaudeBatch {
+        scan_run: run.clone(),
+        environment: scope.environment().clone(),
+        source: scope.source().clone(),
+        host_match: scope.host_match(),
+        files: vec![report],
+        skipped: Vec::new(),
+        completeness,
+    })
+}
+
+fn collect_file_report(
+    scope: &CollectionScope,
+    relative: &str,
+    file_ordinal: u32,
+    limits: &ClaudeReadLimits,
+    remaining_bytes: &mut u64,
+    remaining_records: &mut usize,
+) -> ClaudeFileReport {
+    let mut report = ClaudeFileReport {
+        file_ordinal,
+        file_object: FileObjectRef::Unavailable,
+        status: ClaudeFileStatus::Read,
+        lines: Vec::new(),
+        counts: ClaudeLineCounts::default(),
+        pending_tail_bytes: 0,
+    };
+    match scope.resolve_regular_file_with(relative, CLAUDE_EXTENSION) {
+        Err(rejection) => {
+            report.status = ClaudeFileStatus::Rejected(ClaudeFileRejection::Path(rejection));
+        }
+        Ok(resolved) => {
+            report.file_object = resolved.object;
+            let outcome = if resolved.len > scope.limits().max_file_bytes {
+                Err(ClaudeFileRejection::TooLarge)
+            } else if resolved.len > *remaining_bytes {
+                Err(ClaudeFileRejection::ByteBudget)
+            } else {
+                *remaining_bytes -= resolved.len;
+                read_lines(
+                    &resolved,
+                    limits,
+                    LongLimits {
+                        record_bytes: limits.max_line_bytes,
+                        ..LongLimits::MAX
+                    },
+                    *remaining_records,
+                )
+            };
+            match outcome {
+                Ok(scanned) => {
+                    *remaining_records -= scanned.lines.len();
+                    report.lines = scanned.lines;
+                    report.counts = scanned.counts;
+                    report.pending_tail_bytes = scanned.pending_tail_bytes;
+                }
+                Err(rejection) => report.status = ClaudeFileStatus::Rejected(rejection),
+            }
+        }
+    }
+    report
 }
 
 #[derive(Debug)]
@@ -426,11 +509,17 @@ fn scan_stream(
     let mut chunk = vec![0u8; CHUNK_BYTES];
     let mut reader = source.take(expected_len.saturating_add(1));
     let mut total = 0u64;
+    let mut interruption_retries = 8;
     loop {
         let read = match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if error.kind() == io::ErrorKind::Interrupted && interruption_retries > 0 =>
+            {
+                interruption_retries -= 1;
+                continue;
+            }
             Err(error) => return Err(ClaudeFileRejection::Io(error.kind())),
         };
         total += read as u64;
