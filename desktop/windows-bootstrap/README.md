@@ -1,9 +1,11 @@
 # ABF Windows Bootstrap
 
 An isolated, unpublished Windows x64 Tauri v2 host candidate with a bundled React,
-TypeScript and Vite frontend. It displays fictional and synthetic demonstrations only.
+TypeScript and Vite frontend. Its dashboard displays fictional and synthetic demonstrations;
+a separate manual diagnostic can read one explicitly configured Windows JSONL copy.
 Windows and Selected WSL are distinct display fixtures; Computer is a derived
-view, never a collection source. No provider data, quota, cost or usage is observed.
+view, never a collection source. Dashboard totals remain synthetic. The copy reader
+reports observed record claims separately, with no account, quota or cost integration.
 
 This workspace has its own pnpm workspace and locks and a standalone Rust
 workspace. It does not import the production CLI or macOS application. The fictional Claude
@@ -197,7 +199,7 @@ cargo test --offline --locked --manifest-path desktop/windows-bootstrap/diagnost
 cargo test --offline --locked --manifest-path rust/crates/abf-collection-boundary/Cargo.toml --test claude_jsonl
 cargo test --offline --locked --manifest-path rust/crates/abf-collection-boundary/Cargo.toml --test claude_demo
 # desktop/windows-bootstrap; use the already installed local Node tools.
-node --import tsx --test --test-isolation=none tests/App.test.tsx tests/syntheticAggregation.test.ts tests/fictionalClaude.test.tsx tests/fictionalFileRead.test.tsx
+node --import tsx --test --test-isolation=none tests/App.test.tsx tests/syntheticAggregation.test.ts tests/fictionalClaude.test.tsx tests/fictionalFileRead.test.tsx tests/claudeCopy.test.tsx
 node_modules/.bin/tsc --noEmit -p tsconfig.app.json
 node_modules/.bin/tsc --noEmit -p tsconfig.node.json
 node_modules/.bin/tsc --noEmit -p tsconfig.test.json
@@ -214,3 +216,87 @@ tests. This is synthetic Linux evidence, not native Windows evidence.
 Native Windows compilation/run, Windows reparse execution, WebView2 IPC, visual
 interaction, profile isolation, OS compatibility, coexistence and WSL execution
 are NOT_RUN. CI and a separately authorized Windows visual check remain separate.
+
+
+## Explicit Windows Claude copy diagnostic (ABF137)
+
+Windows / Claude Code has a separate **Read selected copy once** action and
+**Clear copy result** action. Its result never enters dashboard totals, historical
+fictional panels, environment aggregation or Computer. This is a diagnostic-local
+contract, not a production event or persistence schema.
+
+`ABF_BOOTSTRAP_CLAUDE_COPY_ROOT` is optional and independent of
+`ABF_BOOTSTRAP_RUNTIME_ROOT`. It is captured once at process startup without
+filesystem access. No root is supplied over IPC, discovered or defaulted from home,
+Claude settings, WSL, accounts or providers. If absent, a read returns
+`COPY_NOT_CONFIGURED`. The configured copy tree must already exist; the reader
+performs no creation, modification, deletion or persistence. ABF137 development
+and tests use only repository fixtures and disposable synthetic roots. No actual
+history read was enabled or exercised. Setting a real-history root or running the
+Windows application still requires separate user authorization.
+
+Public IPC contract:
+
+```text
+abf_read_claude_copy_once({ relativePath: string }) -> Promise<string>
+```
+
+The success string is JSON, bounded to 16384 characters by the frontend. The path
+is caller-selected, ASCII, at most 512 bytes, `/`-separated, at most four components,
+and ends in `.jsonl`. Absolute paths, traversal, empty components, backslashes,
+alternate streams, reserved Windows names, wildcards and trailing dots/spaces are
+refused. The configured root is an ASCII absolute drive path below the drive root,
+with the existing boundary's canonical-path requirements. UNC, device and WSL
+paths are rejected before filesystem contact. A narrow `GetDriveTypeW` probe accepts
+only `DRIVE_FIXED`; remote, removable, unknown and unsupported drive types yield
+`COPY_LOCALITY_UNCOVERED`. This is a conservative locality safeguard, not storage
+attestation. Root ancestors are checked from the drive downward for symlinks and
+reparse attributes before root authorization. The existing single-file reader
+checks selected path components for detected redirections and regular-file status.
+No directories are enumerated. Missing files and file admission failures return
+incomplete coverage with file failure counts and unavailable claims.
+
+Budgets: one file, 65536 bytes per file and batch, 8192 bytes per line, 128 retained
+record outcomes, four relative components. The scope's one-entry budget is unused
+by the single-file API. Parsing and summary reuse ABF135's
+`collect_claude_jsonl_file()`; there is no second collector.
+
+The separate schema v1 payload has fixed `provenance=configured-windows-copy`,
+`originalSource=not-established`, `originalEnvironment=not-established`,
+`basis=observed-record-claims` and `duplicates=unresolved`. Its remaining fields
+are `completeness`, `components`, `records`, `lines`, `files`, and `skipped` counts,
+and derived `caveats`. Numerical claim sums are decimal strings; absence and
+indeterminate claims stay distinct from valid zero. No source paths, source IDs,
+models, messages, content or native environment assertions are serialized.
+React uses the existing exact nested numerical validator and shared summary table,
+with a separate exact provenance validator. It never treats the copy as fictional
+or claims its original source was Windows or native WSL. The synthetic test golden
+is explicitly a fictional test of this copy transport, not proof of provenance.
+
+Native errors are fixed codes only: `COPY_NOT_CONFIGURED`, `COPY_ATTEMPT_CONSUMED`,
+`COPY_PATH_REFUSED`, `COPY_ROOT_REFUSED`, `COPY_LOCALITY_UNCOVERED`,
+`COPY_PLATFORM_UNSUPPORTED`, or `COPY_READ_FAILED`. Frontend transport validation
+adds `COPY_RESPONSE_INVALID`; unknown rejection details become `COPY_READ_FAILED`.
+The summary's file failure codes remain numerical counts (`path`, `tooLarge`,
+`byteBudget`, `outputLimit`, `changedDuringRead`, `io`).
+
+Both frontend and native guards allow one attempt per process/module lifetime,
+including errors and concurrent requests. No mount, selection, timer, polling,
+refresh or automatic retry invokes this command. Clearing removes UI results,
+discards late completions and leaves the attempt consumed. It does not cancel a
+blocking filesystem read or delete files. A displayed capture has unknown current
+freshness; complete file reading does not establish complete usage. Restart is
+required for another attempt.
+
+Contract A V2 residual limits apply: checks and opens are path-based, not atomic
+confinement against concurrent swaps. Metadata-preserving rewrites may escape
+change detection. The existing Windows reader does not establish stable file
+identity or detect hard links, and blocking filesystem calls have no wall-time
+cancellation deadline. Detected reparse points, including mounted folders, are
+refused; ASCII-only paths and fixed drives deliberately restrict this diagnostic.
+The locality probe uses one documented synchronous Kernel32 API through a narrow
+unsafe FFI module; the bootstrap denies unsafe code elsewhere. No dependencies
+were added. Native Windows compilation/execution, reparse/mapped-drive behavior,
+WebView2 interaction and Windows 10/11 compatibility are NOT_RUN and require a
+separate user-controlled synthetic validation step. Linux harness evidence does
+not validate those mechanisms or authorize real data access.

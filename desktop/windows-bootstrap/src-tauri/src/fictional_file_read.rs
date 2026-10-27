@@ -7,8 +7,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-#[path = "fictional_file_payload.rs"]
-mod payload;
+use crate::fictional_file_payload as payload;
 
 const DIRECTORY: &str = "abf136-fictional-claude-once";
 const FILE: &str = "fictional.jsonl";

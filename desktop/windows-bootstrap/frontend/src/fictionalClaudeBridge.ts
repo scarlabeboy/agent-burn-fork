@@ -50,6 +50,8 @@ export type FictionalClaudeSummary = Readonly<{
   }>;
 }>;
 
+export type ClaudeClaimSummary = Omit<FictionalClaudeSummary, 'provenance' | 'environmentKind' | 'hostMatch'>;
+
 type SettledState =
   | Readonly<{ status: 'fictional'; summary: FictionalClaudeSummary }>
   | Readonly<{ status: 'unavailable' }>;
@@ -115,6 +117,14 @@ export function isFictionalClaudeSummary(value: unknown): value is FictionalClau
     || (value.environmentKind !== 'windows' && value.environmentKind !== 'wsl')
     // A fictional payload is always simulated: a native host match would be real-mode data.
     || value.hostMatch !== 'simulated'
+    || (value.completeness !== 'complete' && value.completeness !== 'incomplete')) return false;
+  return isClaudeClaimSummary(value);
+}
+
+/** Shared numerical and coverage checks; callers separately enforce exact provenance keys. */
+export function isClaudeClaimSummary(value: unknown): value is ClaudeClaimSummary {
+  if (!isRecord(value) || value.schemaVersion !== 1 || value.basis !== 'observed-record-claims'
+    || value.duplicates !== 'unresolved'
     || (value.completeness !== 'complete' && value.completeness !== 'incomplete')) return false;
   const { components, records, lines, files, skipped, caveats } = value;
   if (!counts(records, RECORD_KEYS)) return false;

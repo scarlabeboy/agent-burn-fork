@@ -1,4 +1,4 @@
-// ABF136: bootstrap-local schema v1 projection, matching the existing fictional panel.
+// Bootstrap-local numerical projection shared by the two separate diagnostic contracts.
 // Kept private so the collection boundary's fictional-only serializer stays closed.
 use abf_collection_boundary::*;
 const PAYLOAD_SCHEMA_VERSION: u8 = 1;
@@ -48,29 +48,30 @@ fn component(component: &ComponentSummary) -> String {
     object(&[("value", value), ("states", states(&component.states))])
 }
 
-// Private to this fixed-fixture diagnostic. Never accepts a caller-selected summary.
+// Each entry point fixes its own provenance contract; no source text is serialized.
 pub(super) fn fictional_payload_json(summary: &ClaudeSummary) -> String {
+    payload_json(summary, false)
+}
+
+pub(super) fn copy_payload_json(summary: &ClaudeSummary) -> String {
+    payload_json(summary, true)
+}
+
+fn payload_json(summary: &ClaudeSummary, copy: bool) -> String {
     let rejected = &summary.lines.rejected;
     let components = &summary.components;
-    object(&[
+    let mut fields = vec![
         ("schemaVersion", number(u64::from(PAYLOAD_SCHEMA_VERSION))),
-        ("provenance", text(PAYLOAD_PROVENANCE)),
+        (
+            "provenance",
+            text(if copy {
+                "configured-windows-copy"
+            } else {
+                PAYLOAD_PROVENANCE
+            }),
+        ),
         ("basis", text("observed-record-claims")),
         ("duplicates", text("unresolved")),
-        (
-            "environmentKind",
-            text(match summary.environment.kind() {
-                EnvironmentKind::WindowsNative => "windows",
-                EnvironmentKind::Wsl2 => "wsl",
-            }),
-        ),
-        (
-            "hostMatch",
-            text(match summary.host_match {
-                HostMatch::Native => "native",
-                HostMatch::Simulated => "simulated",
-            }),
-        ),
         (
             "completeness",
             text(match summary.completeness {
@@ -179,5 +180,32 @@ pub(super) fn fictional_payload_json(summary: &ClaudeSummary) -> String {
                 ("skippedInScope", flag(summary.caveats.skipped_in_scope)),
             ]),
         ),
-    ])
+    ];
+    if copy {
+        fields.push(("originalSource", text("not-established")));
+        fields.push(("originalEnvironment", text("not-established")));
+    } else {
+        // Preserve the fictional schema's original wire ordering.
+        fields.insert(
+            4,
+            (
+                "environmentKind",
+                text(match summary.environment.kind() {
+                    EnvironmentKind::WindowsNative => "windows",
+                    EnvironmentKind::Wsl2 => "wsl",
+                }),
+            ),
+        );
+        fields.insert(
+            5,
+            (
+                "hostMatch",
+                text(match summary.host_match {
+                    HostMatch::Native => "native",
+                    HostMatch::Simulated => "simulated",
+                }),
+            ),
+        );
+    }
+    object(&fields)
 }

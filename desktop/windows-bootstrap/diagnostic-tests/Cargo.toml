@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [lib]
-path = "../src-tauri/src/fictional_file_read.rs"
+path = "lib.rs"
 
 [dependencies]
 abf-collection-boundary = { path = "../../../rust/crates/abf-collection-boundary" }

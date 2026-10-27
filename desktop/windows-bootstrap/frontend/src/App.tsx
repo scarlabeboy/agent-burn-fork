@@ -9,8 +9,11 @@ import type { EnvironmentId, HarnessId, QuotaPanelDefinition } from './synthetic
 import { fictionalResultsSnapshot } from './fictionalResultsSnapshot.ts';
 import { splitFictionalResults } from './fictionalResultsView.ts';
 import { fictionalClaudeBridge } from './fictionalClaudeBridge.ts';
-import type { ComponentId, ComponentSummary, FictionalClaudeState, FictionalClaudeSummary } from './fictionalClaudeBridge.ts';
+import type { ComponentId, ComponentSummary, FictionalClaudeState } from './fictionalClaudeBridge.ts';
 import { fictionalFileDiagnostic } from './fictionalFileDiagnostic.ts';
+import { claudeCopyDiagnostic } from './claudeCopyDiagnostic.ts';
+import type { CopyDiagnosticState } from './claudeCopyDiagnostic.ts';
+import type { ClaudeClaimSummary } from './fictionalClaudeBridge.ts';
 import type { FileDiagnosticState } from './fictionalFileDiagnostic.ts';
 
 const fictionalResults = splitFictionalResults(fictionalResultsSnapshot);
@@ -25,6 +28,9 @@ type ShellViewProps = Readonly<{
   /** Explicit fictional Claude summary; when omitted nothing extra is rendered. */
   fictionalClaude?: FictionalClaudeState;
   fileDiagnostic?: FileDiagnosticState;
+  copyDiagnostic?: CopyDiagnosticState;
+  onRunCopyDiagnostic?: (relativePath: string) => void;
+  onClearCopyDiagnostic?: () => void;
   onRunFileDiagnostic?: () => void;
   onClearFileDiagnostic?: () => void;
 }>;
@@ -57,16 +63,16 @@ const claudeComponents: readonly (readonly [ComponentId, string])[] = Object.fre
 ] as const);
 
 /** Distinguishes a sum (an explicit zero stays "0"), no valid claims, no observations and overflow. */
-function claudeValueText(component: ComponentSummary): string {
+function claudeValueText(component: ComponentSummary, fictional: boolean): string {
   switch (component.value.kind) {
-    case 'sum': return `${component.value.amount} observed claims (fictional)`;
+    case 'sum': return `${component.value.amount} observed claims${fictional ? ' (fictional)' : ''}`;
     case 'no-valid-claims': return 'No valid claims';
     case 'indeterminate': return 'Unavailable - no observations';
     case 'overflow': return 'Overflow - sum exceeds 64 bits';
   }
 }
 
-function claudeGaps(summary: FictionalClaudeSummary): string[] {
+function claudeGaps(summary: ClaudeClaimSummary): string[] {
   const { caveats, lines, files, skipped } = summary;
   return [
     caveats.incompleteBatch ? 'Incomplete coverage: traversal or reading did not finish for every candidate.' : '',
@@ -89,7 +95,6 @@ function FictionalClaudePanel({ state, id = 'fictional-claude' }: Readonly<{ sta
     );
   }
   const { summary } = state;
-  const gaps = claudeGaps(summary);
   return (
     <Region id={id} title={title}>
       <p><Status tone="synthetic">FICTIONAL FIXTURE · not your data</Status></p>
@@ -97,8 +102,16 @@ function FictionalClaudePanel({ state, id = 'fictional-claude' }: Readonly<{ sta
         real Claude history, account, quota or spending is read. This is not a Selected WSL, Windows or Computer total.</p>
       <p className="page-note">Counting basis: observed record claims, every record counted. Duplicate-record identity
         is unresolved, so repeated records count each time; these are neither unique events nor billed consumption.</p>
+      <ClaudeSummaryDetails summary={summary} fictional />
+    </Region>
+  );
+}
+
+function ClaudeSummaryDetails({ summary, fictional = false }: Readonly<{ summary: ClaudeClaimSummary; fictional?: boolean }>): React.JSX.Element {
+  const gaps = claudeGaps(summary);
+  return <>
       <table className="table">
-        <caption className="visually-hidden">Observed claims by token component, fictional</caption>
+        <caption className="visually-hidden">Observed claims by token component{fictional ? ', fictional' : ''}</caption>
         <thead>
           <tr>
             <th scope="col">Component</th>
@@ -118,7 +131,7 @@ function FictionalClaudePanel({ state, id = 'fictional-claude' }: Readonly<{ sta
             return (
               <tr key={id} data-component={id} data-outcome={component.value.kind}>
                 <th scope="row">{label}</th>
-                <td>{claudeValueText(component)}</td>
+                <td>{claudeValueText(component, fictional)}</td>
                 <td>{states.valid}</td>
                 <td>{states.validZero}</td>
                 <td>{states.absent}</td>
@@ -133,7 +146,7 @@ function FictionalClaudePanel({ state, id = 'fictional-claude' }: Readonly<{ sta
       <p className="page-note">Cache tokens are shown separately and never added to input or output. Cache creation
         uses the detailed breakdown when present and is never added to the flat claim
         ({summary.records.cacheCreationFlatIgnored} record(s) had both).</p>
-      <ul className="breakdown" aria-label="Fictional Claude records and coverage">
+      <ul className="breakdown" aria-label={fictional ? 'Fictional Claude records and coverage' : 'Copy records and coverage'}>
         <li className="breakdown__row"><span>Records parsed</span>
           <span>{summary.records.observations} (accepted {summary.records.accepted}, qualified {summary.records.qualified}, incomplete {summary.records.incomplete})</span></li>
         <li className="breakdown__row"><span>Records with a valid / no valid token claim</span>
@@ -150,12 +163,39 @@ function FictionalClaudePanel({ state, id = 'fictional-claude' }: Readonly<{ sta
         <li className="breakdown__row"><span>Collection</span><span>{summary.completeness}</span></li>
       </ul>
       {gaps.length > 0 ? (
-        <ul className="breakdown" aria-label="Fictional Claude coverage gaps">
+        <ul className="breakdown" aria-label={fictional ? 'Fictional Claude coverage gaps' : 'Copy coverage gaps'}>
           {gaps.map((gap) => <li className="breakdown__row" key={gap}>{gap}</li>)}
         </ul>
       ) : <p className="page-note">No known gaps observed. This is not a completeness proof.</p>}
-    </Region>
-  );
+  </>;
+}
+
+function ClaudeCopyPanel({ state, onRun, onClear }: Readonly<{
+  state: CopyDiagnosticState; onRun?: (relativePath: string) => void; onClear?: () => void;
+}>): React.JSX.Element {
+  const [relativePath, setRelativePath] = React.useState('');
+  return <Region id="claude-copy" title="Explicit Windows Claude JSONL copy - manual read">
+    <p className="page-note">Explicitly configured Windows copy; original source and environment are not established.
+      This result stays separate from all environment, Computer and demo totals.</p>
+    <p className="page-note">One manual attempt per app run, including failures. No refresh or persistence.
+      Counting basis: observed record claims. Duplicate identity is unresolved; these are not unique events or billed consumption.</p>
+    <label>Relative JSONL path (use / between folders)
+      <input value={relativePath} maxLength={512} disabled={state.attempted}
+        onChange={(event) => setRelativePath(event.target.value)} autoComplete="off" spellCheck={false} />
+    </label>
+    <button type="button" disabled={state.attempted || relativePath.length === 0}
+      onClick={() => { onRun?.(relativePath); setRelativePath(''); }}>Read selected copy once</button>
+    <button type="button" disabled={!state.attempted || state.status === 'cleared'}
+      onClick={() => { setRelativePath(''); onClear?.(); }}>Clear copy result</button>
+    <p className="page-note" role="status" aria-live="polite">{
+      state.status === 'idle' ? 'Ready. A separately configured copy root is required.'
+        : state.status === 'running' ? 'Reading selected copy. No result yet.'
+          : state.status === 'cleared' ? 'Result cleared from memory. Attempt remains consumed; late results are discarded.'
+            : state.status === 'unavailable' ? `Unavailable: ${state.code}. No result; restart required for another attempt.`
+              : 'Captured once; current freshness is unknown. Complete reading does not establish complete usage.'
+    }</p>
+    {state.status === 'copy' ? <ClaudeSummaryDetails summary={state.summary} /> : null}
+  </Region>;
 }
 
 function QuotaPanel({ panel }: Readonly<{ panel: QuotaPanelDefinition }>): React.JSX.Element {
@@ -169,7 +209,7 @@ function QuotaPanel({ panel }: Readonly<{ panel: QuotaPanelDefinition }>): React
   );
 }
 
-export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bridgeState = { status: 'loading' }, fictionalClaude, fileDiagnostic, onRunFileDiagnostic, onClearFileDiagnostic }: ShellViewProps): React.JSX.Element {
+export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bridgeState = { status: 'loading' }, fictionalClaude, fileDiagnostic, onRunFileDiagnostic, onClearFileDiagnostic, copyDiagnostic, onRunCopyDiagnostic, onClearCopyDiagnostic }: ShellViewProps): React.JSX.Element {
   const environment = environmentOf(selection);
   const harness = harnessOf(selection);
   const isGeneral = harness.id === 'general';
@@ -200,7 +240,7 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
             ))}
           </ul>
         </nav>
-        <p className="banner" role="note">{shellText.banner}</p>
+        <p className="banner" role="note">{copyDiagnostic === undefined ? shellText.banner : 'DEMO / SYNTHETIC - dashboard; separate manual copy reader'}</p>
       </header>
 
       <nav className="sidebar" aria-label="Harness">
@@ -227,8 +267,9 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
             <h1 id="page-title">{pageHeading(selection)}</h1>
             <Status tone={derived ? 'derived' : 'unavailable'}>{environment.status}</Status>
           </div>
-          <p className="page-scope">{environment.scope}</p>
-          <p className="page-note">{shellText.explanation}</p>
+          <p className="page-scope">{copyDiagnostic !== undefined && environment.id === 'windows'
+            ? 'Windows dashboard fixture. Automatic collection disabled; manual copy reader below is separate.' : environment.scope}</p>
+          <p className="page-note">{copyDiagnostic === undefined ? shellText.explanation : 'Dashboard is synthetic; manual copy reader is separate. No account, quota or spending is observed.'}</p>
           <p className="page-note" role="status">
             {bridgeState.status === 'synthetic'
               ? 'Local synthetic bridge responded · DEMO / SYNTHETIC · collection disabled'
@@ -267,6 +308,9 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
               ))}
             </ul>
           </Region>
+
+          {copyDiagnostic !== undefined && environment.id === 'windows' && harness.id === 'claude-code'
+            ? <ClaudeCopyPanel state={copyDiagnostic} onRun={onRunCopyDiagnostic} onClear={onClearCopyDiagnostic} /> : null}
 
           {fileDiagnostic !== undefined && environment.id === 'selected-wsl' && harness.id === 'claude-code' ? (
             <Region id="fictional-file-read" title="Fictional one-shot Claude file-read diagnostic">
@@ -368,13 +412,16 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
       </main>
 
       <footer className="statusbar">
-        <p>{shellText.statusBar}</p>
+        <p>{copyDiagnostic === undefined ? shellText.statusBar : 'Synthetic dashboard - separate manual copy result; no account connected'}</p>
       </footer>
     </div>
   );
 }
 
 export function App(): React.JSX.Element {
+  const copyDiagnostic = React.useSyncExternalStore(
+    claudeCopyDiagnostic.subscribe, claudeCopyDiagnostic.getSnapshot, claudeCopyDiagnostic.getSnapshot,
+  );
   const fileDiagnostic = React.useSyncExternalStore(
     fictionalFileDiagnostic.subscribe, fictionalFileDiagnostic.getSnapshot, fictionalFileDiagnostic.getSnapshot,
   );
@@ -400,6 +447,7 @@ export function App(): React.JSX.Element {
     [],
   );
   return <ShellView selection={selection} onSelectEnvironment={onSelectEnvironment} onSelectHarness={onSelectHarness} bridgeState={bridgeState}
-    fictionalClaude={fictionalClaude} fileDiagnostic={fileDiagnostic}
+    copyDiagnostic={copyDiagnostic} onRunCopyDiagnostic={(path) => { void claudeCopyDiagnostic.run(path); }}
+    onClearCopyDiagnostic={claudeCopyDiagnostic.clear} fictionalClaude={fictionalClaude} fileDiagnostic={fileDiagnostic}
     onRunFileDiagnostic={() => { void fictionalFileDiagnostic.run(); }} onClearFileDiagnostic={fictionalFileDiagnostic.clear} />;
 }
