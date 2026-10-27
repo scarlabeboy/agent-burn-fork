@@ -309,7 +309,7 @@ test('renders deterministically without runtime inputs', () => {
   }
 });
 
-test('frontend allows only the reviewed core invoke and the two reviewed commands, with no network, timers or storage', () => {
+test('frontend allows only the reviewed core invoke and the three reviewed commands, with no network, timers or storage', () => {
   const root = fileURLToPath(new URL('../frontend/src/', import.meta.url));
   const files = (directory: string): string[] =>
     readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
@@ -325,6 +325,7 @@ test('frontend allows only the reviewed core invoke and the two reviewed command
     const reviewed: Record<string, string> = {
       'syntheticBridge.ts': 'abf_get_synthetic_snapshot',
       'fictionalClaudeBridge.ts': 'abf_get_fictional_claude_summary',
+      'fictionalFileDiagnostic.ts': 'abf_read_fictional_claude_file_once',
     };
     const command = Object.entries(reviewed).find(([name]) => file === join(root, name))?.[1];
     if (command !== undefined) {
@@ -431,7 +432,7 @@ test('official core invoke sends only the approved command with no frontend argu
   }
 });
 
-test('native boundary registers exactly the two reviewed commands and enables only official IPC CSP endpoints', () => {
+test('native boundary registers exactly the three reviewed commands and enables only official IPC CSP endpoints', () => {
   const nativeRoot = new URL('../src-tauri/', import.meta.url);
   const main = readFileSync(new URL('src/main.rs', nativeRoot), 'utf8');
   const command = readFileSync(new URL('src/synthetic_snapshot.rs', nativeRoot), 'utf8');
@@ -439,7 +440,7 @@ test('native boundary registers exactly the two reviewed commands and enables on
   const config = JSON.parse(readFileSync(new URL('tauri.conf.json', nativeRoot), 'utf8'));
   const handlers = [...main.matchAll(/\.invoke_handler\(tauri::generate_handler!\[([^\]]*)\]\)/gu)];
   assert.deepEqual(handlers.map((match) => match[1]?.replace(/\s+/gu, ' ').trim()), [
-    'synthetic_snapshot::abf_get_synthetic_snapshot, fictional_claude_summary::abf_get_fictional_claude_summary',
+    'synthetic_snapshot::abf_get_synthetic_snapshot, fictional_claude_summary::abf_get_fictional_claude_summary, abf_read_fictional_claude_file_once',
   ]);
   const claude = readFileSync(new URL('src/fictional_claude_summary.rs', nativeRoot), 'utf8');
   assert.equal([...claude.matchAll(/#\[tauri::command\]/gu)].length, 1);

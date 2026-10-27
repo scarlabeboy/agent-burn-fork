@@ -1,13 +1,13 @@
 # ABF Windows Bootstrap
 
 An isolated, unpublished Windows x64 Tauri v2 host candidate with a bundled React,
-TypeScript and Vite frontend. It displays a fixed synthetic demo only.
+TypeScript and Vite frontend. It displays fictional and synthetic demonstrations only.
 Windows and Selected WSL are distinct display fixtures; Computer is a derived
 view, never a collection source. No provider data, quota, cost or usage is observed.
 
 This workspace has its own pnpm workspace and locks and a standalone Rust
-workspace. It does not import the production CLI, model/adapter research crates
-or macOS application. React is bundled into local static assets; the future
+workspace. It does not import the production CLI or macOS application. The fictional Claude
+panels use the isolated collection boundary and parser research crates. React is bundled into local static assets; the future
 native executable will not need Node, pnpm or a production web server.
 
 ## Bounded frontend validation
@@ -48,8 +48,9 @@ drive path below the drive root (for example C:\ABF-Isolated-Run). Missing,
 relative, UNC, device, bare drive-root and parent-traversal paths are rejected
 before window creation. These are lexical checks only: they do not prove that
 the selected root is fresh, safe, local or isolated. The fixed child webview2 is
-passed to Tauri's data_directory API. Application code does not discover or
-explicitly create directories and has no HOME/LOCALAPPDATA fallback. Tauri may
+passed to Tauri's data_directory API. Application code has no discovery or
+HOME/LOCALAPPDATA fallback. Only the manual ABF136 diagnostic described below
+explicitly creates a fixed test child and fictional file. Tauri may
 recursively create missing profile directories, and WebView2 may create directories
 and write profile/cache data. A missing or mistyped root is not refused merely
 because it does not exist.
@@ -60,7 +61,7 @@ mapped drives), permissions, environment/registry overrides and coexistence.
 Lexical acceptance is not filesystem-isolation proof. Never point this variable
 at an existing Agent Burn installation or real user data.
 
-Exactly one synthetic application command, `abf_get_synthetic_snapshot`, takes
+The synthetic application command, `abf_get_synthetic_snapshot`, takes
 no arguments and returns fixed synthetic data. Windows and Selected WSL are its
 only source entries; Computer remains a derived view. The historical M6D schema v1
 returned null-only placeholders. M6E explicitly evolves the response to schema v2
@@ -113,7 +114,7 @@ dev/build, native installers or a development server as part of these checks.
 
 ## Fictional Claude usage summary (ABF134F)
 
-A second argument-free command, `abf_get_fictional_claude_summary`, returns one JSON string
+The existing argument-free demo command, `abf_get_fictional_claude_summary`, returns one JSON string
 (schema version 1) that the frontend validates strictly and renders in a clearly labelled
 panel for **Selected WSL / Claude Code only**; every other view is unchanged and an absent or
 invalid payload shows nothing in its place. It is **fictional**: the Rust command calls
@@ -139,3 +140,77 @@ one dependency edge, edited by hand because the Tauri registry packages are not 
 offline. `tests/fictionalClaude.test.tsx` reads the Rust-generated golden payload
 (`expected-payload.json`, asserted byte-for-byte by the Rust suite). Native Windows compilation
 of the new command, IPC and rendering are NOT_RUN.
+
+
+## Manual fictional file-read diagnostic (ABF136)
+
+Selected WSL / Claude Code also has **Run fictional file-read once**. This invokes
+the argument-free `abf_read_fictional_claude_file_once` command only on a manual click.
+It copies the fixed checked-in `fixtures/abf136-fictional.jsonl` bytes into
+`ABF_BOOTSTRAP_RUNTIME_ROOT/abf136-fictional-claude-once/fictional.jsonl`, then
+calls ABF135's `collect_claude_jsonl_file()` on that single file and the existing
+Rust summary pipeline. There is no directory enumeration or provider discovery.
+
+The root must already exist at diagnostic time. Before filesystem contact the
+diagnostic applies the collection boundary's root syntax checks. It checks all
+ancestors for symlinks and, on Windows, reparse attributes, and requires the
+boundary's canonical authorized root. It creates the fixed child exclusively
+with `create_dir`, checks it again, and creates the file with `create_new`.
+Any existing child, including a directory, file or dangling link, refuses the
+attempt. There is no overwrite, reuse, fallback directory, cleanup or deletion.
+Writes and sync errors refuse the attempt. Both success and failure consume the
+native atomic one-shot guard; simultaneous requests cannot create multiple reads.
+The root is captured from the required startup configuration, never from IPC.
+
+Budgets are one file, 8192 bytes per file and batch, 2048 bytes per line, 16 retained
+outcomes, one directory entry and depth one. The file has separate fictional claim
+sums of 17 input, 3 output, 2 cache creation and 4 cache read tokens, an explicit
+input zero, a null output, absent cache claims, a malformed line and a pending tail.
+These gaps are visible; complete reading is not complete usage. Rejected files
+retain coverage codes and indeterminate claims, never invented zero consumption.
+
+Only the bootstrap-local, private schema v1 projection crosses IPC: numerical
+claims, coverage diagnostics and fixed fictional/simulated enum strings. Paths,
+file contents, identities, models and labels do not reach React. The existing
+fictional demo command and its private serializer remain unchanged. The diagnostic
+uses the existing strict frontend validator and summary panel with distinct IDs.
+It never contributes to synthetic dashboard or environment totals.
+
+The diagnostic's state is separate and has no mount-time read, timer, retry or
+polling. **Clear diagnostic result** clears only UI memory, suppresses late
+in-flight results and leaves the attempt consumed. It never deletes files or
+rearms collection. Another attempt requires an app restart with a fresh isolated
+runtime root. No arbitrary path, account, credential, home, history, network or
+WSL access is implemented.
+
+Checks remain path-based under Contract A V2, not atomic confinement or a coherent
+snapshot against concurrent path swaps or metadata-preserving rewrites. Windows
+file identity/hard-link limitations and blocking filesystem-call limits of the
+existing reader still apply. Use only a trusted, isolated fictional test tree.
+This slice grants no production reader authority or native WSL provenance.
+
+Local offline checks, with existing dependencies (no install or downloads):
+
+```sh
+# Repository root; standalone harness avoids compiling or running Tauri.
+cargo test --offline --locked --manifest-path desktop/windows-bootstrap/diagnostic-tests/Cargo.toml
+cargo test --offline --locked --manifest-path rust/crates/abf-collection-boundary/Cargo.toml --test claude_jsonl
+cargo test --offline --locked --manifest-path rust/crates/abf-collection-boundary/Cargo.toml --test claude_demo
+# desktop/windows-bootstrap; use the already installed local Node tools.
+node --import tsx --test --test-isolation=none tests/App.test.tsx tests/syntheticAggregation.test.ts tests/fictionalClaude.test.tsx tests/fictionalFileRead.test.tsx
+node_modules/.bin/tsc --noEmit -p tsconfig.app.json
+node_modules/.bin/tsc --noEmit -p tsconfig.node.json
+node_modules/.bin/tsc --noEmit -p tsconfig.test.json
+node_modules/.bin/vite build --config vite.config.ts
+```
+
+The standalone harness compiles the actual diagnostic helper with only the two
+existing local Rust dependencies. Disposable trees are under its ignored target/.
+Linux tests simulate Windows, while the Windows application simulates WSL; the
+golden comparison explicitly adjusts only that environment-kind enum. The
+checked-in sanitized golden payload is also validated and rendered by frontend
+tests. This is synthetic Linux evidence, not native Windows evidence.
+
+Native Windows compilation/run, Windows reparse execution, WebView2 IPC, visual
+interaction, profile isolation, OS compatibility, coexistence and WSL execution
+are NOT_RUN. CI and a separately authorized Windows visual check remain separate.

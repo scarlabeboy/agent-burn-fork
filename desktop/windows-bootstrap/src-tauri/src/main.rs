@@ -7,6 +7,19 @@ compile_error!("ABF Windows Bootstrap supports Windows x64 only");
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 mod fictional_claude_summary;
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+mod fictional_file_read;
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+#[tauri::command]
+async fn abf_read_fictional_claude_file_once(
+    state: tauri::State<'_, std::sync::Arc<fictional_file_read::Diagnostic>>,
+) -> Result<String, &'static str> {
+    let diagnostic = std::sync::Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || diagnostic.run())
+        .await
+        .map_err(|_| "Fictional file diagnostic failed; no result.")?
+}
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 mod synthetic_snapshot;
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -41,13 +54,21 @@ fn runtime_directory() -> Result<std::path::PathBuf, std::io::Error> {
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Apply lexical checks before framework/window initialization. Application code does not
-    // explicitly create directories; Tauri/WebView2 may create missing profile directories.
+    // Capture the explicitly configured root before framework/window initialization.
+    // The manual diagnostic alone creates its fixed child; WebView2 owns its profile.
     let profile = runtime_directory()?;
+    let diagnostic = std::sync::Arc::new(fictional_file_read::Diagnostic::new(
+        profile
+            .parent()
+            .expect("validated profile parent")
+            .to_path_buf(),
+    ));
     tauri::Builder::default()
+        .manage(diagnostic)
         .invoke_handler(tauri::generate_handler![
             synthetic_snapshot::abf_get_synthetic_snapshot,
-            fictional_claude_summary::abf_get_fictional_claude_summary
+            fictional_claude_summary::abf_get_fictional_claude_summary,
+            abf_read_fictional_claude_file_once
         ])
         .setup(move |app| {
             tauri::WebviewWindowBuilder::new(

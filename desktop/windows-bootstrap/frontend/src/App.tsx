@@ -10,6 +10,8 @@ import { fictionalResultsSnapshot } from './fictionalResultsSnapshot.ts';
 import { splitFictionalResults } from './fictionalResultsView.ts';
 import { fictionalClaudeBridge } from './fictionalClaudeBridge.ts';
 import type { ComponentId, ComponentSummary, FictionalClaudeState, FictionalClaudeSummary } from './fictionalClaudeBridge.ts';
+import { fictionalFileDiagnostic } from './fictionalFileDiagnostic.ts';
+import type { FileDiagnosticState } from './fictionalFileDiagnostic.ts';
 
 const fictionalResults = splitFictionalResults(fictionalResultsSnapshot);
 
@@ -22,6 +24,9 @@ type ShellViewProps = Readonly<{
   bridgeState?: BridgeState;
   /** Explicit fictional Claude summary; when omitted nothing extra is rendered. */
   fictionalClaude?: FictionalClaudeState;
+  fileDiagnostic?: FileDiagnosticState;
+  onRunFileDiagnostic?: () => void;
+  onClearFileDiagnostic?: () => void;
 }>;
 
 function Status({ tone, children }: Readonly<{ tone: 'unavailable' | 'derived' | 'synthetic'; children: React.ReactNode }>): React.JSX.Element {
@@ -72,11 +77,11 @@ function claudeGaps(summary: FictionalClaudeSummary): string[] {
   ].filter((entry) => entry !== '');
 }
 
-function FictionalClaudePanel({ state }: Readonly<{ state: FictionalClaudeState }>): React.JSX.Element {
+function FictionalClaudePanel({ state, id = 'fictional-claude' }: Readonly<{ state: FictionalClaudeState; id?: string }>): React.JSX.Element {
   const title = 'Fictional Claude usage summary - demonstration only';
   if (state.status !== 'fictional') {
     return (
-      <Region id="fictional-claude" title={title}>
+      <Region id={id} title={title}>
         <p className="page-note" role="status">{state.status === 'loading'
           ? 'Fictional Claude summary: loading'
           : 'Fictional Claude summary unavailable. Nothing is shown in its place.'}</p>
@@ -86,7 +91,7 @@ function FictionalClaudePanel({ state }: Readonly<{ state: FictionalClaudeState 
   const { summary } = state;
   const gaps = claudeGaps(summary);
   return (
-    <Region id="fictional-claude" title={title}>
+    <Region id={id} title={title}>
       <p><Status tone="synthetic">FICTIONAL FIXTURE · not your data</Status></p>
       <p className="page-note">Produced by the Rust parser, collector and summary from a fixed fictional fixture. No
         real Claude history, account, quota or spending is read. This is not a Selected WSL, Windows or Computer total.</p>
@@ -164,7 +169,7 @@ function QuotaPanel({ panel }: Readonly<{ panel: QuotaPanelDefinition }>): React
   );
 }
 
-export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bridgeState = { status: 'loading' }, fictionalClaude }: ShellViewProps): React.JSX.Element {
+export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bridgeState = { status: 'loading' }, fictionalClaude, fileDiagnostic, onRunFileDiagnostic, onClearFileDiagnostic }: ShellViewProps): React.JSX.Element {
   const environment = environmentOf(selection);
   const harness = harnessOf(selection);
   const isGeneral = harness.id === 'general';
@@ -263,6 +268,25 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
             </ul>
           </Region>
 
+          {fileDiagnostic !== undefined && environment.id === 'selected-wsl' && harness.id === 'claude-code' ? (
+            <Region id="fictional-file-read" title="Fictional one-shot Claude file-read diagnostic">
+              <p className="page-note">Fixed fictional test data only. Simulated provenance; not native WSL collection.
+                One manual attempt per app run. Results stay separate from all demo totals.</p>
+              <button type="button" disabled={fileDiagnostic.attempted} onClick={onRunFileDiagnostic}>Run fictional file-read once</button>
+              <button type="button" disabled={!fileDiagnostic.attempted || fileDiagnostic.status === 'cleared'}
+                onClick={onClearFileDiagnostic}>Clear diagnostic result</button>
+              <p className="page-note" role="status" aria-live="polite">{
+                fileDiagnostic.status === 'idle' ? 'Ready for a manual fictional file-read attempt.'
+                  : fileDiagnostic.status === 'running' ? 'Reading the fixed fictional file...'
+                    : fileDiagnostic.status === 'cleared' ? 'Result cleared from memory. Files are never deleted; the attempt stays consumed.'
+                      : fileDiagnostic.status === 'unavailable' ? 'Diagnostic unavailable. No result. Another attempt requires a fresh isolated runtime root and app restart.'
+                        : 'Fictional file read finished. Inspect coverage below.'
+              }</p>
+              {fileDiagnostic.status === 'fictional'
+                ? <FictionalClaudePanel id="fictional-file-summary" state={fileDiagnostic} /> : null}
+            </Region>
+          ) : null}
+
           {fictionalClaude !== undefined && environment.id === 'selected-wsl' && harness.id === 'claude-code'
             ? <FictionalClaudePanel state={fictionalClaude} /> : null}
 
@@ -351,6 +375,9 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
 }
 
 export function App(): React.JSX.Element {
+  const fileDiagnostic = React.useSyncExternalStore(
+    fictionalFileDiagnostic.subscribe, fictionalFileDiagnostic.getSnapshot, fictionalFileDiagnostic.getSnapshot,
+  );
   const [selection, setSelection] = React.useState<Selection>(initialSelection);
   const [bridgeState, setBridgeState] = React.useState<BridgeState>({ status: 'loading' });
   React.useEffect(() => {
@@ -373,5 +400,6 @@ export function App(): React.JSX.Element {
     [],
   );
   return <ShellView selection={selection} onSelectEnvironment={onSelectEnvironment} onSelectHarness={onSelectHarness} bridgeState={bridgeState}
-    fictionalClaude={fictionalClaude} />;
+    fictionalClaude={fictionalClaude} fileDiagnostic={fileDiagnostic}
+    onRunFileDiagnostic={() => { void fictionalFileDiagnostic.run(); }} onClearFileDiagnostic={fictionalFileDiagnostic.clear} />;
 }

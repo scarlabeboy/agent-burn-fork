@@ -1,0 +1,4 @@
+{"type":"assistant","sessionId":"fictional-abf136","message":{"content":"ABF136-CONTENT","usage":{"input_tokens":17,"output_tokens":3,"cache_creation_input_tokens":2,"cache_read_input_tokens":4}}}
+{"type":"assistant","message":{"usage":{"input_tokens":0,"output_tokens":null}}}
+{bad-json}
+unfinished

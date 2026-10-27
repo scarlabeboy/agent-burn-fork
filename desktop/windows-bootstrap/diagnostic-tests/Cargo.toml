@@ -1,0 +1,13 @@
+[package]
+name = "abf-bootstrap-diagnostic-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "../src-tauri/src/fictional_file_read.rs"
+
+[dependencies]
+abf-collection-boundary = { path = "../../../rust/crates/abf-collection-boundary" }
