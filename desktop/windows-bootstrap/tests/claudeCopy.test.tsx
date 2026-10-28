@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createClaudeCopyDiagnostic, isClaudeCopySummary } from '../frontend/src/claudeCopyDiagnostic.ts';
+import type { ClaudeCopySummary } from '../frontend/src/claudeCopyDiagnostic.ts';
+import type { ComponentSummary } from '../frontend/src/fictionalClaudeBridge.ts';
 import { ShellView } from '../frontend/src/App.tsx';
 const fixture: unknown = JSON.parse(readFileSync(new URL('../fixtures/abf136-expected-payload.json', import.meta.url), 'utf8'));
 const golden = readFileSync(new URL('../fixtures/abf137-expected-payload.json', import.meta.url), 'utf8').trim();
@@ -107,4 +109,54 @@ test('shell scopes demo-only claims when a separate copy reader is present', () 
   }));
   assert.match(markup, /Dashboard is synthetic; manual copy reader is separate/u);
   assert.doesNotMatch(markup, /nothing has been observed|Collection is disabled in this shell/u);
+});
+
+const noUsage: unknown = JSON.parse(readFileSync(new URL('../fixtures/abf139-no-usage-payload.json', import.meta.url), 'utf8'));
+const mixed: unknown = JSON.parse(readFileSync(new URL('../fixtures/abf139-mixed-payload.json', import.meta.url), 'utf8'));
+assert.ok(isClaudeCopySummary(noUsage));
+assert.ok(isClaudeCopySummary(mixed));
+function copyPanel(summary: ClaudeCopySummary): string {
+  const markup = renderToStaticMarkup(createElement(ShellView, {
+    selection: { environment: 'windows', harness: 'claude-code' },
+    onSelectEnvironment: () => {}, onSelectHarness: () => {},
+    copyDiagnostic: { status: 'copy', attempted: true, summary },
+  }));
+  const start = markup.indexOf('<section class="panel" aria-labelledby="claude-copy-title"');
+  return markup.slice(start, markup.indexOf('</section>', start));
+}
+test('successful no-usage session explains missing claims without claiming zero usage', () => {
+  const panel = copyPanel(noUsage);
+  assert.match(panel, /File read succeeded; no valid token claims were recognized/u);
+  assert.match(panel, /does not establish zero usage or a parser defect/u);
+  assert.match(panel, /Session events and records with absent or null usage can have no token claims/u);
+  assert.doesNotMatch(panel, /0 observed claims|File was not read/u);
+});
+test('mixed session displays recognized claims and warns about incomplete token coverage', () => {
+  const panel = copyPanel(mixed);
+  assert.match(panel, /File read succeeded; valid token claims were recognized/u);
+  assert.match(panel, /130 observed claims/u);
+  assert.match(panel, /Records without valid claims and missing, null or invalid components leave token coverage incomplete/u);
+});
+test('read result with discarded lines or tails explains uncovered input', () => {
+  assert.match(copyPanel(copy), /Malformed, oversized or parser-refused lines and unterminated tails are not counted/u);
+});
+test('file failures and record exhaustion are not presented as successful no-usage reads', () => {
+  const unobserved = {
+    value: { kind: 'indeterminate', reason: 'no-observations' },
+    states: { ...noUsage.components.input.states, absent: 0, null: 0, unsupported: 0 },
+  } as const satisfies ComponentSummary;
+  const failed = {
+    ...noUsage, completeness: 'incomplete',
+    components: { input: unobserved, output: unobserved, cacheCreation: unobserved, cacheRead: unobserved },
+    records: { observations: 0, accepted: 0, qualified: 0, incomplete: 0, withValidClaim: 0, withoutValidClaim: 0,
+      withInvalidClaim: 0, withNullClaim: 0, withMissingClaim: 0, cacheCreationFlatIgnored: 0 },
+    lines: { ...noUsage.lines, terminatedLines: 0 },
+    files: { ...noUsage.files, read: 0, rejected: 1, outputLimit: 1 },
+    caveats: { ...noUsage.caveats, incompleteBatch: true, rejectedFiles: true },
+  } as const satisfies ClaudeCopySummary;
+  assert.ok(isClaudeCopySummary(failed));
+  const panel = copyPanel(failed);
+  assert.match(panel, /File was not read successfully/u);
+  assert.match(panel, /Record budget exhaustion discards all claims from the file/u);
+  assert.doesNotMatch(panel, /File read succeeded/u);
 });

@@ -1,0 +1,13 @@
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"file-history-snapshot","snapshot":{"trackedFileBackups":{}}}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"queue-operation","operation":"enqueue","content":"ABF139-FICTIONAL"}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"user","message":{"role":"user","content":"ABF139-FICTIONAL"}}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"progress","data":{"type":"hook_progress","hookEvent":"PreToolUse"}}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"system","subtype":"turn_duration","durationMs":123}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"summary","summary":"ABF139-FICTIONAL","leafUuid":"fictional-leaf"}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"fictional-tool","content":"ABF139-FICTIONAL"}]}}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"assistant","message":{"role":"assistant","content":[]}}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"assistant","message":{"role":"assistant","usage":null}}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"assistant","message":{"role":"assistant","usage":{}}}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"assistant","message":{"role":"assistant","usage":{"input_tokens":null,"output_tokens":null}}}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto"}}
+{"sessionId":"abf139-fictional-session","timestamp":"2026-01-02T03:04:05.000Z","type":"progress","data":{"type":"agent_progress","message":{"usage":{"input_tokens":999999}}}}

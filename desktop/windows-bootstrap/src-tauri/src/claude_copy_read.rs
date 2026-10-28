@@ -88,8 +88,10 @@ impl CopyReader {
             policy,
         )
         .map_err(|_| "COPY_PLATFORM_UNSUPPORTED")?
+        // Copy-only budgets: one small session file, bounded streaming lines and outcomes.
+        // These do not change the historical fictional reader or collector defaults.
         .with_limits(CollectionLimits {
-            max_file_bytes: 65536,
+            max_file_bytes: 1024 * 1024,
             max_entries: 1,
             max_depth: 4,
         })
@@ -100,9 +102,9 @@ impl CopyReader {
             relative,
             ClaudeReadLimits {
                 max_files: 1,
-                max_total_bytes: 65536,
-                max_line_bytes: 8192,
-                max_records: 128,
+                max_total_bytes: 1024 * 1024,
+                max_line_bytes: 64 * 1024,
+                max_records: 1024,
             },
         )
         .map_err(|_| "COPY_READ_FAILED")?;

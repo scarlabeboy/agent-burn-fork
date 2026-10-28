@@ -256,9 +256,25 @@ checks selected path components for detected redirections and regular-file statu
 No directories are enumerated. Missing files and file admission failures return
 incomplete coverage with file failure counts and unavailable claims.
 
-Budgets: one file, 65536 bytes per file and batch, 8192 bytes per line, 128 retained
-record outcomes, four relative components. The scope's one-entry budget is unused
-by the single-file API. Parsing and summary reuse ABF135's
+ABF139 copy-only budgets: one file, 1048576 bytes (1 MiB) per file and batch,
+65536 bytes (64 KiB) per line, 1024 retained record outcomes, four relative
+components. The previous caps were 65536 bytes per file, 8192 bytes per line and
+128 outcomes. A session can contain many non-usage events and substantial message
+content before assistant usage appears. These caps admit modest sessions while
+remaining at or below the shared collector defaults (64 MiB batch, 1 MiB line,
+1024 outcomes); they do not promise coverage of every session. Files above the
+file/byte budget are rejected, not partially totaled. Exhausting the record budget
+discards every outcome from that file. An oversized line is discarded unparsed;
+a malformed/parser-refused line or unterminated tail contributes no claims.
+
+Memory remains bounded by the existing streaming implementation: a 64 KiB I/O
+chunk, a line buffer limited to 64 KiB (Vec allocation growth can reserve more),
+and at most 1024 retained outcomes. The shared long parser limits each result to
+4096 retained bytes excluding allocator overhead, each retained string to 256
+bytes, nesting to 32 and entries to 1048576 per line. It skips message content
+without building a JSON tree. The file cap is not a whole-file allocation.
+The fictional reader's limits and fixtures are unchanged. The scope's one-entry
+budget is unused by the single-file API. Parsing and summary reuse ABF135's
 `collect_claude_jsonl_file()`; there is no second collector.
 
 The separate schema v1 payload has fixed `provenance=configured-windows-copy`,
@@ -300,3 +316,33 @@ were added. Native Windows compilation/execution, reparse/mapped-drive behavior,
 WebView2 interaction and Windows 10/11 compatibility are NOT_RUN and require a
 separate user-controlled synthetic validation step. Linux harness evidence does
 not validate those mechanisms or authorize real data access.
+
+ABF139 realistic session coverage uses only invented checked-in fixtures:
+`fixtures/abf139-session-events.jsonl` has 13 user, system, progress, summary,
+file-history and assistant records, including absent, empty and null usage. All
+13 produce incomplete observations with no valid token claims and no parser
+rejections; no component is reported as zero. Nested progress data does not count
+as the record's `message.usage`. Appending `abf139-assistant-usage.jsonl` adds four
+assistant records, including partial claims, an explicit zero and a cache-creation
+breakdown. The resulting separate claim sums are input 130, output 32, cache
+creation 64 and cache read 500; flat creation 999 is ignored when the breakdown
+11 + 13 is present. The two ABF139 payload goldens are compared with actual Rust
+copy-reader output and validated/rendered by frontend tests.
+
+Both the retained upstream adapter (`UsageEntry.message.usage`) and ABF's parser
+read the nested usage shape. The upstream adapter requires input and output and
+defaults absent flat cache components; the diagnostic intentionally retains ABF's
+more explicit per-field states and unresolved duplicates. No parser, dependency,
+IPC schema or collection architecture was added. A successful read without claims
+does not establish zero usage or a parser defect. File coverage and token coverage
+remain distinct, including when collection is labeled complete.
+
+For a user-controlled Windows native retest, build this candidate with the existing
+Windows toolchain and use a trusted isolated local fixed-drive copy root, first
+with these synthetic fixtures. Configure `ABF_BOOTSTRAP_CLAUDE_COPY_ROOT` before
+startup, select a permitted relative JSONL path, read once and inspect coverage
+and separate component claims. Restart for each further attempt and verify Clear
+removes the displayed result without rearming. Retest boundary failures and the
+unchanged ABF136/137 commands. Native compilation, WebView2 interaction and Windows
+10/11 filesystem behavior remain unverified here. Any personal-copy retest remains
+user-controlled and requires separate explicit authorization; ABF139 reads none.

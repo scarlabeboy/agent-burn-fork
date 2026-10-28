@@ -74,6 +74,125 @@ mod tests {
         );
     }
     #[test]
+    fn realistic_copy_over_old_byte_line_and_record_caps_recognizes_usage() {
+        let tree = Tree::new();
+        let events = include_str!("../fixtures/abf139-session-events.jsonl");
+        let usage = include_str!("../fixtures/abf139-assistant-usage.jsonl");
+        // 130 events plus 4 claims; a 16 KiB user line exceeds the old 8 KiB cap.
+        let content = format!(
+            "{}{{\"type\":\"user\",\"message\":{{\"content\":\"{}\"}}}}\n{}",
+            events.repeat(10),
+            "x".repeat(16 * 1024),
+            usage
+        );
+        let content = format!("{}{}", " ".repeat(70 * 1024) + "\n", content);
+        fs::write(tree.0.join("copy.jsonl"), content).unwrap();
+        let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+            .run("copy.jsonl")
+            .unwrap();
+        assert!(result.contains("\"read\":1"));
+        assert!(result.contains("\"observations\":135"));
+        assert!(result.contains("\"withValidClaim\":4"));
+        assert!(result.contains("\"amount\":\"130\""));
+        assert!(result.contains("\"oversized\":1"));
+        assert!(!result.contains("ABF139-FICTIONAL"));
+    }
+
+    #[test]
+    fn copy_record_budget_discards_file_without_publishing_partial_claims() {
+        let tree = Tree::new();
+        let usage = include_str!("../fixtures/abf139-assistant-usage.jsonl")
+            .lines()
+            .next()
+            .unwrap();
+        fs::write(
+            tree.0.join("copy.jsonl"),
+            format!("{usage}\n{}", "{}\n".repeat(1024)),
+        )
+        .unwrap();
+        let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+            .run("copy.jsonl")
+            .unwrap();
+        assert!(result.contains("\"outputLimit\":1"));
+        assert!(result.contains("\"observations\":0"));
+        assert!(result.contains("no-observations"));
+        assert!(!result.contains("\"amount\":"));
+    }
+
+    #[test]
+    fn realistic_no_usage_and_mixed_payloads_match_frontend_fixtures() {
+        let tree = Tree::new();
+        let events = include_str!("../fixtures/abf139-session-events.jsonl");
+        let usage = include_str!("../fixtures/abf139-assistant-usage.jsonl");
+        for (content, expected) in [
+            (
+                events.to_owned(),
+                include_str!("../fixtures/abf139-no-usage-payload.json"),
+            ),
+            (
+                format!("{events}{usage}"),
+                include_str!("../fixtures/abf139-mixed-payload.json"),
+            ),
+        ] {
+            fs::write(tree.0.join("copy.jsonl"), content).unwrap();
+            let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+                .run("copy.jsonl")
+                .unwrap();
+            assert_eq!(result, expected.trim());
+        }
+    }
+
+    #[test]
+    fn exact_file_budget_is_read_but_not_an_unbounded_buffer() {
+        let tree = Tree::new();
+        let content = format!("{}\n", " ".repeat(1024 * 1024 - 1));
+        fs::write(tree.0.join("copy.jsonl"), content).unwrap();
+        let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+            .run("copy.jsonl")
+            .unwrap();
+        assert!(result.contains("\"read\":1"));
+        assert!(result.contains("\"oversized\":1"));
+        assert!(result.contains("no-observations"));
+    }
+
+    #[test]
+    fn line_at_budget_retains_claims_and_next_byte_makes_it_oversized() {
+        let tree = Tree::new();
+        let usage = include_str!("../fixtures/abf139-assistant-usage.jsonl")
+            .lines()
+            .next()
+            .unwrap();
+        let line = format!("{}{}", usage, " ".repeat(64 * 1024 - usage.len()));
+        fs::write(tree.0.join("copy.jsonl"), format!("{line}\n{line} \n")).unwrap();
+        let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+            .run("copy.jsonl")
+            .unwrap();
+        assert!(result.contains("\"observations\":1"));
+        assert!(result.contains("\"amount\":\"120\""));
+        assert!(result.contains("\"oversized\":1"));
+    }
+
+    #[test]
+    fn exact_record_budget_retains_final_assistant_claim() {
+        let tree = Tree::new();
+        let usage = include_str!("../fixtures/abf139-assistant-usage.jsonl")
+            .lines()
+            .next()
+            .unwrap();
+        fs::write(
+            tree.0.join("copy.jsonl"),
+            format!("{}{usage}\n", "{}\n".repeat(1023)),
+        )
+        .unwrap();
+        let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+            .run("copy.jsonl")
+            .unwrap();
+        assert!(result.contains("\"observations\":1024"));
+        assert!(result.contains("\"withValidClaim\":1"));
+        assert!(result.contains("\"amount\":\"120\""));
+    }
+
+    #[test]
     fn disabled_and_invalid_root_are_coded_and_one_shot() {
         let reader = CopyReader::synthetic_test_root(None);
         assert_eq!(reader.run("copy.jsonl"), Err("COPY_NOT_CONFIGURED"));
@@ -119,7 +238,7 @@ mod tests {
         assert!(missing.contains("\"path\":1"));
         assert!(missing.contains("no-observations"));
         assert!(!missing.contains("\"amount\":\"0\""));
-        fs::write(tree.0.join("large.jsonl"), vec![b'x'; 65537]).unwrap();
+        fs::write(tree.0.join("large.jsonl"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
         let large = CopyReader::synthetic_test_root(Some(tree.0.clone()))
             .run("large.jsonl")
             .unwrap();

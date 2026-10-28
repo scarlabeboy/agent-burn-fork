@@ -179,6 +179,7 @@ function ClaudeCopyPanel({ state, onRun, onClear }: Readonly<{
       This result stays separate from all environment, Computer and demo totals.</p>
     <p className="page-note">One manual attempt per app run, including failures. No refresh or persistence.
       Counting basis: observed record claims. Duplicate identity is unresolved; these are not unique events or billed consumption.</p>
+    <p className="page-note">Copy limits: one file, 1 MiB per file, 64 KiB per line and 1,024 retained record outcomes.</p>
     <label>Relative JSONL path (use / between folders)
       <input value={relativePath} maxLength={512} disabled={state.attempted}
         onChange={(event) => setRelativePath(event.target.value)} autoComplete="off" spellCheck={false} />
@@ -192,9 +193,24 @@ function ClaudeCopyPanel({ state, onRun, onClear }: Readonly<{
         : state.status === 'running' ? 'Reading selected copy. No result yet.'
           : state.status === 'cleared' ? 'Result cleared from memory. Attempt remains consumed; late results are discarded.'
             : state.status === 'unavailable' ? `Unavailable: ${state.code}. No result; restart required for another attempt.`
-              : 'Captured once; current freshness is unknown. Complete reading does not establish complete usage.'
+              : state.status === 'copy' ? (state.summary.files.read === 0 ? 'File was not read successfully. See file failure counts; no usage conclusion is available.'
+                : state.summary.records.withValidClaim === 0 ? 'File read succeeded; no valid token claims were recognized. This does not establish zero usage or a parser defect.'
+                  : 'File read succeeded; valid token claims were recognized. Sums describe observed record claims only.') : ''
     }</p>
-    {state.status === 'copy' ? <ClaudeSummaryDetails summary={state.summary} /> : null}
+    {state.status === 'copy' ? <>
+      <p className="page-note">Captured once; current freshness is unknown. Complete file reading does not establish
+        complete usage. Session events and records with absent or null usage can have no token claims.</p>
+      {state.summary.records.withoutValidClaim > 0 || state.summary.records.withMissingClaim > 0
+        || state.summary.records.withNullClaim > 0 || state.summary.records.withInvalidClaim > 0 ?
+        <p className="page-note">Records without valid claims and missing, null or invalid components leave token coverage incomplete.</p> : null}
+      {state.summary.caveats.unparsedLines || state.summary.caveats.pendingTails ?
+        <p className="page-note">Malformed, oversized or parser-refused lines and unterminated tails are not counted.
+          Coverage excludes these bytes; any shown sums cover only retained valid claims.</p> : null}
+      {state.summary.files.tooLarge > 0 || state.summary.files.byteBudget > 0 || state.summary.files.outputLimit > 0 ?
+        <p className="page-note">A file or byte budget can prevent reading. Record budget exhaustion discards all claims from the file;
+          no truncated prefix total is published. Restart is required for another attempt.</p> : null}
+      <ClaudeSummaryDetails summary={state.summary} />
+    </> : null}
   </Region>;
 }
 
