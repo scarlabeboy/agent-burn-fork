@@ -19,8 +19,12 @@
 //! [`claude_jsonl`] adds a fictional Claude-shaped JSONL path (ABF134D) that delegates line
 //! parsing to `abf-parser`.
 //!
+//! [`claude_replay`] optionally compares retained Claude observation claims within one
+//! bounded batch, separately from the unchanged raw summary. It establishes no unique
+//! physical-event or billed-consumption count.
+//!
 //! It is **not** a Codex or OpenCode parser, performs no
-//! deduplication or canonicalization, and never discovers user directories
+//! canonicalization, and never discovers user directories
 //! on its own. It is meant for small, stable, trusted synthetic fixtures. See
 //! `README.md` for the contract, known limitations and deferred work.
 
@@ -28,6 +32,7 @@
 
 pub mod claude_demo;
 pub mod claude_jsonl;
+pub mod claude_replay;
 pub mod claude_summary;
 pub mod identity;
 pub mod observation;

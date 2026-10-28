@@ -19,6 +19,8 @@ pub(crate) const KNOWN_BREAKDOWN_KEYS: [&str; 2] =
 /// `Debug` is redacted: it prints field states, never identifiers, timestamps or counts.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ClaudeObservation {
+    /// Separate identity evidence; invalid evidence never changes token status/diagnostics.
+    pub identity: ClaudeIdentity,
     pub correlation: Option<Box<str>>,
     pub session_id: Field<Box<str>>,
     pub request_id: Field<Box<str>>,
@@ -39,6 +41,43 @@ pub struct ClaudeObservation {
     pub cache_creation_1h: Field<u64>,
     pub status: Status,
     pub diagnostics: Diagnostics,
+}
+
+/// Bounded source claims, not authenticated event identity. Empty strings are WrongType;
+/// oversized strings are OutOfRange. Streaming duplicate fields are Unsupported.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClaudeIdentity {
+    pub record_type: Field<Box<str>>,
+    /// Opaque record UUID claim; no UUID syntax or authenticity certification.
+    pub record_uuid: Field<Box<str>>,
+    pub is_sidechain: Field<bool>,
+}
+
+impl Default for ClaudeIdentity {
+    fn default() -> Self {
+        Self {
+            record_type: Field::Absent,
+            record_uuid: Field::Absent,
+            is_sidechain: Field::Absent,
+        }
+    }
+}
+
+impl fmt::Debug for ClaudeIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClaudeIdentity")
+            .field("record_type", &state(&self.record_type))
+            .field("record_uuid", &state(&self.record_uuid))
+            .field("is_sidechain", &state(&self.is_sidechain))
+            .finish()
+    }
+}
+
+pub(crate) fn identity_text(field: Field<Box<str>>) -> Field<Box<str>> {
+    match field {
+        Field::Valid(s) if s.is_empty() => Field::WrongType,
+        other => other,
+    }
 }
 
 impl ClaudeObservation {
@@ -89,6 +128,7 @@ fn state<T>(field: &Field<T>) -> &'static str {
 impl fmt::Debug for ClaudeObservation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClaudeObservation")
+            .field("identity", &self.identity)
             .field(
                 "correlation",
                 &self.correlation.as_ref().map(|_| "<redacted>"),
@@ -132,6 +172,8 @@ impl ClaudeParseResult {
         if let Some(o) = self.observation() {
             bytes = bytes.checked_add(o.correlation.as_deref().map_or(0, str::len))?;
             for field in [
+                &o.identity.record_type,
+                &o.identity.record_uuid,
                 &o.session_id,
                 &o.request_id,
                 &o.timestamp,
@@ -234,6 +276,20 @@ fn observe(
         }
     };
     let mut o = ClaudeObservation {
+        identity: ClaudeIdentity {
+            record_type: identity_text(
+                metadata(root.get("type"), limits).unwrap_or(Field::OutOfRange),
+            ),
+            record_uuid: identity_text(
+                metadata(root.get("uuid"), limits).unwrap_or(Field::OutOfRange),
+            ),
+            is_sidechain: match root.get("isSidechain") {
+                None => Field::Absent,
+                Some(Node::Null) => Field::Null,
+                Some(Node::Bool(value)) => Field::Valid(*value),
+                _ => Field::WrongType,
+            },
+        },
         correlation: correlation.map(Box::from),
         session_id: metadata(root.get("sessionId"), limits)?,
         request_id: metadata(root.get("requestId"), limits)?,

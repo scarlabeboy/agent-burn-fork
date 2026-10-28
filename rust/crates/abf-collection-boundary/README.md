@@ -8,7 +8,8 @@ trusted synthetic fixture trees**.
 
 It is **not** a Claude Code, Codex or OpenCode parser, not a complete
 Windows/WSL collector, not a production-ready collector, and not a
-deduplication or canonicalization engine.
+general deduplication or canonicalization engine. ABF140B adds only the optional
+source-scoped exact-observation replay comparison documented below.
 
 Status: implementation candidate from gate M1 (conversation ABF8, with the
 ABF8 targeted security corrections). The contracts it follows are
@@ -359,3 +360,76 @@ deterministic and never fails; every gap is a field.
   `Complete` batch coexist: a clean summary is never a completeness proof.
 - **Scope:** one batch, one environment, one source. No Windows or Computer totals; summaries
   are not merged.
+
+## Conservative Claude exact-observation replays (ABF140B)
+
+`ClaudeBatch::exact_replay_summary(max_identity_observations)` returns
+`claude_replay::ClaudeReplaySummary { raw, evaluation }`. `raw` is exactly the
+existing `summary()` output; the collection, token rules, public raw summary,
+demo golden payload and Windows IPC/dashboard payload remain unchanged.
+
+`ReplayEvaluation::Evaluated(ReplayClaims)` carries the explicit basis
+`SourceScopedExactObservationClaimsV1`. It compares only observations in this
+one batch/environment/source/run. A replay means equal retained source-declared
+identity and usage evidence, not equal raw JSON, authenticated UUIDs, proven
+physical events or billed consumption. Content is never retained or compared.
+
+Eligibility requires all of the following:
+
+- Explicit `type: "assistant"` and `isSidechain: false`.
+- Nonempty, at-most-256-byte UUID, session, request, message, model and timestamp
+  strings. UUID and timestamp remain opaque claims; no authenticity or clock
+  semantics are inferred. Missing/invalid fields are ineligible.
+- Accepted parser status, no diagnostics, and valid input, output, cache-read
+  and resolved cache-creation claims. Incomplete/qualified usage remains raw.
+- Every observation related by an equal nonempty UUID or session/message pair
+  must have identical full retained evidence and also be eligible. These
+  relations can flag uncertainty only; neither establishes equivalence alone.
+  Different request IDs, UUIDs, types, metadata, field states, flat/breakdown
+  cache evidence or token values leave the affected group unresolved. A later
+  conflict invalidates preceding exact copies too. No larger/later preference.
+
+`eligible_observations` includes replay copies; `representatives` counts one per
+eligible group; `replay_observations` counts its extra copies.
+`eligible_observations + unresolved_observations == raw.records.observations`.
+`components` uses the existing checked component accumulators on representatives
+only. It is an **eligible subset**, never an all-source usage total. Its field
+states describe that subset; original states remain in `raw`. No eligible
+observations yields Indeterminate(NoObservations), not zero usage. Cache creation
+uses the existing breakdown rule and never adds the flat claim to the breakdown.
+
+`unresolved` reports overlapping reason counts: invalid identity, unsupported
+record type, sidechain, invalid claims and conflicting evidence. Conflicting
+evidence includes a related ineligible peer, not just differing token numbers.
+Sidechains always remain unresolved; an otherwise eligible related parent is
+also unresolved. Every raw record and claim stays in the batch and raw summary.
+`raw` carries all file/line/traversal coverage and caveats. Evaluated only means
+the bounded comparison ran; it never certifies complete coverage. Unknown records
+or skipped lines may contain further duplicates or conflicts outside this view.
+
+The caller can lower the identity observation budget to any value in 0..=4096.
+The bound includes all observations, including ineligible ones, to prevent a
+later unseen conflict from validating a prefix. Exceeding it returns
+`IdentityBudgetExhausted { observations, limit }`, with no ReplayClaims payload;
+a limit above 4096 returns InvalidIdentityLimit. Reservation failure returns
+AllocationFailure; a non-Claude source returns WrongHarness. Raw coverage and
+claims remain available on every outcome. No partial replay result is emitted.
+
+Storage is one fallibly reserved vector of at most 4096 borrowed observation
+pointers (32 KiB of requested pointer payload on x64); no identity strings or
+observations are cloned, no persistent index is created. Allocator overhead and
+the caller's existing batch are separate. The unchanged raw summary also copies
+its bounded caller labels. Comparison is O(n^2) over bounded fields and at most
+4096 observations; this is a bounded first slice, not an
+incremental scanner or a throughput claim. The original file/record/parser and
+collection limits are unchanged. The larger parser result layout/payload must
+be accounted for by callers using lowered parser result budgets (parser README).
+
+Upstream reference: `agent-burn/src/adapter/claude/mod.rs` uses
+`push_deduped_entry`, `loaded_entry_matches_dedupe_key`,
+`loaded_entry_matches_sidechain_dedupe_key` and `should_replace_deduped_entry`;
+`claude/daily.rs` has `push_deduped_daily_entry`. Their message/request and
+sidechain observations informed candidate-conflict detection. Their parent,
+larger-token-total, speed and cost replacement preferences are not adopted.
+ABF reuses its existing parsers and summary accumulators. No upstream adapter,
+pricing, quota, persistence, discovery, Windows or WSL integration is added.

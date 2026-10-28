@@ -355,6 +355,7 @@ fn content_and_identifiers_are_not_disclosed() {
     assert_eq!(
         result.retained_bytes().unwrap(),
         std::mem::size_of::<ClaudeParseResult>()
+            + "assistant".len()
             + "fict-correlation".len()
             + "fict-session".len()
             + "fict-req".len()

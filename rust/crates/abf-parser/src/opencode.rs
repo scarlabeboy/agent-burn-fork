@@ -8,6 +8,7 @@ pub(crate) enum Node<'a> {
     String(String),
     Number(&'a str),
     Null,
+    Bool(bool),
     Other,
 }
 impl<'a> Node<'a> {
@@ -248,7 +249,7 @@ impl<'a> Decoder<'a> {
                 Ok(if word == b"null" {
                     Node::Null
                 } else {
-                    Node::Other
+                    Node::Bool(word == b"true")
                 })
             }
             _ => Err(Code::MalformedJson),

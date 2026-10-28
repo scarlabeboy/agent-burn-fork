@@ -1,5 +1,6 @@
 use crate::claude::{
-    ClaudeObservation, ClaudeParseResult, KNOWN_BREAKDOWN_KEYS, KNOWN_USAGE_KEYS, finalize,
+    ClaudeIdentity, ClaudeObservation, ClaudeParseResult, KNOWN_BREAKDOWN_KEYS, KNOWN_USAGE_KEYS,
+    finalize, identity_text,
 };
 use crate::{Code, Diagnostics, Field, Status};
 
@@ -335,8 +336,47 @@ impl<'a> Scan<'a> {
 
     fn root(&mut self, o: &mut ClaudeObservation, unsupported: &mut bool) -> Result<(), Code> {
         let depth = self.enter(0)?;
+        let mut identity_seen = [false; 3];
         let (mut session, mut request, mut timestamp, mut message) = (false, false, false, false);
         self.members(depth, |s, key, depth| match key.as_deref() {
+            Some(name @ ("type" | "uuid" | "isSidechain")) => {
+                let slot = match name {
+                    "type" => 0,
+                    "uuid" => 1,
+                    _ => 2,
+                };
+                if slot == 2 {
+                    s.ws()?;
+                    let field = match s.peek().ok_or(Code::IncompleteJson)? {
+                        b't' => s.literal(b"true").map(|()| Field::Valid(true))?,
+                        b'f' => s.literal(b"false").map(|()| Field::Valid(false))?,
+                        b'n' => s.literal(b"null").map(|()| Field::Null)?,
+                        _ => s.skip_value(depth).map(|()| Field::WrongType)?,
+                    };
+                    o.identity.is_sidechain = if identity_seen[slot] {
+                        Field::Unsupported
+                    } else {
+                        field
+                    };
+                } else {
+                    let field = match s.meta(depth) {
+                        Err(Code::StringBudget) => Field::OutOfRange,
+                        other => identity_text(other?),
+                    };
+                    let target = if slot == 0 {
+                        &mut o.identity.record_type
+                    } else {
+                        &mut o.identity.record_uuid
+                    };
+                    *target = if identity_seen[slot] {
+                        Field::Unsupported
+                    } else {
+                        field
+                    };
+                }
+                identity_seen[slot] = true;
+                Ok(())
+            }
             Some("sessionId") => {
                 once(&mut session)?;
                 o.session_id = s.meta(depth)?;
@@ -489,8 +529,9 @@ impl<'a> Scan<'a> {
 /// Guarantees: the whole record is checked as UTF-8 and as JSON (grammar, escapes, depth,
 /// entry count); a record over `record_bytes`, `depth` or `entries` is rejected with
 /// `FrameBudget`, `DepthBudget` or `EntryBudget`, never truncated or counted as zero.
-/// Duplicate keys are rejected for the root, `message`, `message.usage` and
-/// `usage.cache_creation` objects, i.e. wherever they could affect a retained claim.
+/// Duplicate keys affecting the original metadata/usage claims are rejected in the root,
+/// `message`, `message.usage` and `usage.cache_creation` objects. New ABF140B identity
+/// keys instead become Unsupported on repetition, preserving previously readable claims.
 /// Duplicate keys inside skipped values (content, tool data, unknown objects) are NOT
 /// detected: that would need memory proportional to the skipped object.
 pub fn parse_claude_long(
@@ -521,6 +562,7 @@ pub fn parse_claude_long(
         };
         // Parents start unavailable; each is replaced as its container is actually seen.
         let mut o = ClaudeObservation {
+            identity: ClaudeIdentity::default(),
             correlation: correlation.map(Box::from),
             session_id: Field::Absent,
             request_id: Field::Absent,

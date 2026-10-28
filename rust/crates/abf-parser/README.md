@@ -146,7 +146,8 @@ deduplication exists.
 Retained claims: `sessionId`, `requestId`, `timestamp` (raw string, not parsed),
 `message.id`, `message.model`, and `message.usage` `input_tokens`, `output_tokens`,
 `cache_read_input_tokens`, `cache_creation_input_tokens` and the
-`cache_creation.ephemeral_5m/1h_input_tokens` breakdown. Everything else (content,
+`cache_creation.ephemeral_5m/1h_input_tokens` breakdown. ABF140B also retains the
+separate identity evidence described below. Everything else (content,
 tool data, paths, `costUSD`, unknown keys) is grammar-checked and discarded.
 A non-object parent gives `Unsupported` children, as in the OpenCode parser.
 `ClaudeObservation::cache_creation()` never adds the flat claim to the breakdown: an
@@ -160,6 +161,27 @@ without a valid input, output, cache-read or cache-creation claim.
 `parse_claude` keeps the 65,536-byte / 256-entry tree budget: a larger frame is rejected
 with `FrameBudget`/`EntryBudget`, never truncated or treated as zero. Equal bytes or equal
 claims imply no event identity; source-local deduplication is not implemented here.
+
+### Conservative identity evidence (ABF140B)
+
+Both parsers add `ClaudeObservation.identity: ClaudeIdentity`, with `record_type`
+(`type`), `record_uuid` (`uuid`) and `is_sidechain` (`isSidechain`). String claims
+are opaque, not authenticated or certified UUID syntax. Fields retain Absent,
+Null, WrongType and Valid states; empty strings are WrongType and strings over
+the caller's existing metadata bound are OutOfRange. Invalid identity evidence
+does not change the existing token fields, status or diagnostics. The streaming
+parser marks repeated new identity keys Unsupported, including escaped spellings
+and third/later repeats, instead of rejecting previously readable token claims.
+The tree parser's existing rejection of all duplicate keys is unchanged.
+
+Identity Debug prints only field states. The two new string payloads are included
+in `retained_bytes()` and the unchanged 4096-byte result ceiling. The inline
+result size has grown: callers lowering `result_bytes` must use the current
+`size_of::<ClaudeParseResult>()` and account for the new payloads. Existing
+record/frame/depth/entry/string ceilings are unchanged; oversized new identity
+strings become unusable evidence rather than a new StringBudget rejection.
+No identity validation is added to token diagnostics. The optional replay
+comparison is in `abf-collection-boundary::claude_replay`, not in this parser.
 
 ### Long records (ABF134C): `parse_claude_long`
 
@@ -184,7 +206,9 @@ Callers may lower, never raise (`InvalidLimits`). Work is O(record bytes) plus O
 Guarantees: the whole record is checked as UTF-8 and JSON (grammar, escapes and surrogates,
 control characters, number syntax, trailing data), including skipped content. Duplicate keys
 are rejected in the root, `message`, `message.usage` and `usage.cache_creation` objects, i.e.
-wherever they could change a retained claim (escaped spellings match). **Not** guaranteed:
+wherever they could change an original metadata/usage claim (escaped spellings match).
+New ABF140B identity keys instead become Unsupported on repetition, as described above.
+**Not** guaranteed:
 duplicate keys inside skipped values (content, tool data, unknown objects) are not detected,
 since that needs memory proportional to the skipped object; the tree parser does reject them.
 A key longer than 64 decoded bytes cannot match a claim; inside `usage` it is treated as an

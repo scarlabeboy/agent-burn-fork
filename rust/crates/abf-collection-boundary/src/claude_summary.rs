@@ -222,19 +222,19 @@ pub struct ClaudeSummary {
     pub caveats: Caveats,
 }
 
-struct Accumulator {
+pub(crate) struct Accumulator {
     sum: Option<u64>,
     states: ClaimStates,
 }
 
 impl Accumulator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             sum: Some(0),
             states: ClaimStates::default(),
         }
     }
-    fn add(&mut self, field: &Field<u64>) {
+    pub(crate) fn add(&mut self, field: &Field<u64>) {
         let states = &mut self.states;
         match field {
             Field::Valid(value) => {
@@ -252,7 +252,7 @@ impl Accumulator {
             Field::Unsupported => states.unsupported += 1,
         }
     }
-    fn finish(self, observations: u64) -> ComponentSummary {
+    pub(crate) fn finish(self, observations: u64) -> ComponentSummary {
         let value = match self.sum {
             None => ComponentValue::Overflow,
             Some(_) if observations == 0 => {

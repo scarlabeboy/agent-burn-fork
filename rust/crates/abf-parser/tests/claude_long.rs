@@ -451,6 +451,7 @@ fn content_and_identifiers_are_not_disclosed() {
     assert_eq!(
         result.retained_bytes().unwrap(),
         size_of::<ClaudeParseResult>()
+            + "assistant".len()
             + "fict-correlation fict-session fict-req 2026-01-02T03:04:05.678Z fict-msg fict-model"
                 .len()
             - 5
