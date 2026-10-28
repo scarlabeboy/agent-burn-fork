@@ -277,7 +277,7 @@ The fictional reader's limits and fixtures are unchanged. The scope's one-entry
 budget is unused by the single-file API. Parsing and summary reuse ABF135's
 `collect_claude_jsonl_file()`; there is no second collector.
 
-The separate schema v1 payload has fixed `provenance=configured-windows-copy`,
+The raw schema v1 payload (nested under `raw` since ABF141) has fixed `provenance=configured-windows-copy`,
 `originalSource=not-established`, `originalEnvironment=not-established`,
 `basis=observed-record-claims` and `duplicates=unresolved`. Its remaining fields
 are `completeness`, `components`, `records`, `lines`, `files`, and `skipped` counts,
@@ -346,3 +346,71 @@ removes the displayed result without rearming. Retest boundary failures and the
 unchanged ABF136/137 commands. Native compilation, WebView2 interaction and Windows
 10/11 filesystem behavior remain unverified here. Any personal-copy retest remains
 user-controlled and requires separate explicit authorization; ABF139 reads none.
+
+
+## Conservative copy replay diagnostic (ABF141)
+
+The existing command remains
+`abf_read_claude_copy_once({ relativePath: string }) -> Promise<string>`,
+with the same allowlisted errors and 16384-character transport cap. Its success
+string now contains an explicit diagnostic-local envelope:
+
+```text
+ClaudeCopyResult {
+  schemaVersion: 1,
+  raw: ClaudeCopySummary, // unchanged raw schema v1, fields and counting basis
+  replay: ClaudeCopyReplay
+}
+```
+
+`ClaudeCopyReplay` is a separate discriminated union:
+
+- `{ status: "evaluated", basis: "source-scoped-exact-observation-claims-v1",
+  eligibleObservations, representatives, exactReplayCopies,
+  unresolvedObservations, unresolved, components }`.
+- `{ status: "identity-budget-exhausted", observations, limit }`.
+- `{ status: "invalid-identity-limit" }`.
+- `{ status: "wrong-harness" }`.
+- `{ status: "allocation-failure" }`.
+
+All counts are nonnegative integers. The evaluated `unresolved` object contains
+`invalidIdentity`, `unsupportedRecordType`, `sidechain`, `invalidClaims` and
+`conflictingEvidence`; reasons overlap and must not be added as a partition.
+`eligibleObservations = representatives + exactReplayCopies`, and eligible plus
+unresolved observations equals the raw observation count. `components` uses
+the existing input/output/cacheCreation/cacheRead component schema, decimal
+string sums and explicit indeterminate/overflow states, over representatives
+only. No eligible observations produces unavailable components, not zero usage.
+
+The reader invokes `exact_replay_summary(COPY_MAX_RECORDS)` on the one existing
+batch, with the same 1024 constant used for retained record outcomes. This covers
+all observations, including ineligible peers; there is no second read, parser,
+collection source or partial-prefix evaluation. Comparison is bounded O(n^2),
+with at most 1024 borrowed observation pointers (8 KiB requested pointer payload
+on x64), plus the existing batch and summary allocations. Replay semantics,
+parser limits, file/line budgets and permissions are unchanged.
+
+React validates the exact envelope and nested replay union separately from the
+raw summary. It displays evaluated counts, overlapping reasons and representative
+token components, labeled **NOT the complete or billed usage total**. These are
+equal retained source claims within this batch, not proven unique physical
+events, cross-file history identities or billable consumption. Unresolved claims
+remain raw. Rejected, oversized and pending lines remain visible coverage gaps
+and may conceal conflicts or more copies. Exhausted, invalid and unavailable
+evaluations display their state without subset counts or token values; raw
+claims and coverage remain available.
+
+Both results share the existing one-shot request and Clear lifecycle. Clearing
+removes both, suppresses late results and never rearms the attempt. No identifiers,
+raw JSONL, message content or source paths enter the response, logs or persistence.
+The fictional panels, dashboard and other harnesses remain unchanged.
+
+Synthetic evidence uses `fixtures/abf141-replay.jsonl` and its sanitized
+`abf141-replay-payload.json`, checked byte-for-byte against the actual Rust
+copy-reader output and consumed by React tests. The standalone Rust harness
+also covers conflicts, empty/ineligible batches, lowered/invalid replay budgets,
+and injected wrong-harness/allocation-failure projection variants. Allocation
+failure is not forced in the allocator. Linux synthetic tests compile the actual
+reader and serializer; they do not compile Tauri or exercise native IPC.
+Native Windows compilation/run, WebView2 transport/interaction, Windows 10/11
+filesystem checks, native WSL collection and GitHub Actions are NOT_RUN.

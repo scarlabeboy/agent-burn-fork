@@ -12,6 +12,9 @@ use crate::fictional_file_payload as payload;
 #[path = "copy_volume_windows.rs"]
 mod volume;
 
+// One identity slot per retained outcome, including ineligible observations.
+const COPY_MAX_RECORDS: usize = 1024;
+
 pub struct CopyReader {
     root: Option<PathBuf>,
     attempted: AtomicBool,
@@ -104,11 +107,13 @@ impl CopyReader {
                 max_files: 1,
                 max_total_bytes: 1024 * 1024,
                 max_line_bytes: 64 * 1024,
-                max_records: 1024,
+                max_records: COPY_MAX_RECORDS,
             },
         )
         .map_err(|_| "COPY_READ_FAILED")?;
-        Ok(payload::copy_payload_json(&batch.summary()))
+        Ok(payload::copy_replay_payload_json(
+            &batch.exact_replay_summary(COPY_MAX_RECORDS),
+        ))
     }
 }
 

@@ -209,3 +209,80 @@ fn payload_json(summary: &ClaudeSummary, copy: bool) -> String {
     }
     object(&fields)
 }
+
+// ABF141 diagnostic-local envelope. Only fixed enums and numerical claims cross IPC.
+pub(super) fn copy_replay_payload_json(summary: &claude_replay::ClaudeReplaySummary) -> String {
+    object(&[
+        ("schemaVersion", number(1)),
+        ("raw", copy_payload_json(&summary.raw)),
+        ("replay", replay_json(&summary.evaluation)),
+    ])
+}
+
+pub(super) fn replay_json(evaluation: &claude_replay::ReplayEvaluation) -> String {
+    use claude_replay::{ReplayBasis, ReplayEvaluation};
+    match evaluation {
+        ReplayEvaluation::Evaluated(claims) => {
+            let basis = match claims.basis {
+                ReplayBasis::SourceScopedExactObservationClaimsV1 => {
+                    "source-scoped-exact-observation-claims-v1"
+                }
+            };
+            object(&[
+                ("status", text("evaluated")),
+                ("basis", text(basis)),
+                ("eligibleObservations", number(claims.eligible_observations)),
+                ("representatives", number(claims.representatives)),
+                ("exactReplayCopies", number(claims.replay_observations)),
+                (
+                    "unresolvedObservations",
+                    number(claims.unresolved_observations),
+                ),
+                (
+                    "unresolved",
+                    object(&[
+                        (
+                            "invalidIdentity",
+                            number(claims.unresolved.invalid_identity),
+                        ),
+                        (
+                            "unsupportedRecordType",
+                            number(claims.unresolved.unsupported_record_type),
+                        ),
+                        ("sidechain", number(claims.unresolved.sidechain)),
+                        ("invalidClaims", number(claims.unresolved.invalid_claims)),
+                        (
+                            "conflictingEvidence",
+                            number(claims.unresolved.conflicting_evidence),
+                        ),
+                    ]),
+                ),
+                (
+                    "components",
+                    object(&[
+                        ("input", component(&claims.components.input)),
+                        ("output", component(&claims.components.output)),
+                        (
+                            "cacheCreation",
+                            component(&claims.components.cache_creation),
+                        ),
+                        ("cacheRead", component(&claims.components.cache_read)),
+                    ]),
+                ),
+            ])
+        }
+        ReplayEvaluation::IdentityBudgetExhausted {
+            observations,
+            limit,
+        } => object(&[
+            ("status", text("identity-budget-exhausted")),
+            ("observations", number(*observations)),
+            ("limit", number(*limit as u64)),
+        ]),
+        ReplayEvaluation::InvalidIdentityLimit => {
+            object(&[("status", text("invalid-identity-limit"))])
+        }
+        ReplayEvaluation::WrongHarness => object(&[("status", text("wrong-harness"))]),
+        ReplayEvaluation::AllocationFailure => object(&[("status", text("allocation-failure"))]),
+    }
+}

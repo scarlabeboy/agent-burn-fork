@@ -38,6 +38,126 @@ mod tests {
         }
     }
 
+    fn raw_payload(result: &str) -> &str {
+        result
+            .strip_prefix("{\"schemaVersion\":1,\"raw\":")
+            .unwrap()
+            .split_once(",\"replay\":")
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn replay_copy_transport_preserves_raw_and_separates_subset() {
+        let tree = Tree::new();
+        fs::write(
+            tree.0.join("copy.jsonl"),
+            include_bytes!("../fixtures/abf141-replay.jsonl"),
+        )
+        .unwrap();
+        let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+            .run("copy.jsonl")
+            .unwrap();
+        assert_eq!(
+            result,
+            include_str!("../fixtures/abf141-replay-payload.json").trim()
+        );
+        assert!(result.starts_with("{\"schemaVersion\":1,\"raw\":{"));
+        assert!(result.contains("\"eligibleObservations\":2,\"representatives\":1,\"exactReplayCopies\":1,\"unresolvedObservations\":0"));
+        assert!(result.contains("\"amount\":\"20\""));
+        assert!(result.contains("\"amount\":\"10\""));
+        assert!(!result.contains("PRIVATE"));
+    }
+
+    #[test]
+    fn conflicting_copy_evidence_keeps_raw_and_no_subset_sum() {
+        let tree = Tree::new();
+        let records = include_str!("../fixtures/abf141-replay.jsonl");
+        let first = records.lines().next().unwrap();
+        let conflicting = first.replace("\"input_tokens\":10", "\"input_tokens\":12");
+        fs::write(
+            tree.0.join("copy.jsonl"),
+            format!("{first}\n{first}\n{conflicting}\n"),
+        )
+        .unwrap();
+        let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+            .run("copy.jsonl")
+            .unwrap();
+        assert!(result.contains("\"amount\":\"32\""));
+        assert!(result.contains("\"eligibleObservations\":0,\"representatives\":0,\"exactReplayCopies\":0,\"unresolvedObservations\":3"));
+        assert!(result.contains("\"conflictingEvidence\":3"));
+        let replay = result.split_once(",\"replay\":").unwrap().1;
+        assert!(replay.contains("no-observations"));
+        assert!(!replay.contains("\"amount\":"));
+    }
+
+    #[test]
+    fn empty_and_ineligible_copies_do_not_invent_zero_subset_usage() {
+        let tree = Tree::new();
+        for (content, unresolved) in [("", 0), ("{}\n", 1)] {
+            fs::write(tree.0.join("copy.jsonl"), content).unwrap();
+            let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+                .run("copy.jsonl")
+                .unwrap();
+            let replay = result.split_once(",\"replay\":").unwrap().1;
+            assert!(replay.contains("\"status\":\"evaluated\""));
+            assert!(replay.contains(&format!("\"unresolvedObservations\":{unresolved}")));
+            assert!(replay.contains("no-observations"));
+            assert!(!replay.contains("\"amount\":"));
+        }
+    }
+
+    #[test]
+    fn replay_failure_projection_has_no_partial_claims() {
+        use abf_collection_boundary::{claude_replay::ReplayEvaluation, *};
+        let id = |s| OpaqueId::new(s).unwrap();
+        let batch = collect_claude_jsonl_memory(
+            EnvironmentIdentity::windows(id("synthetic")),
+            SourceInstance::new(id("synthetic"), Harness::ClaudeCode),
+            &ScanRun::new(id("synthetic"), CaptureTime::NotRecorded),
+            &[b"{}\n"],
+            ClaudeReadLimits::default(),
+        )
+        .unwrap();
+        for (evaluation, expected) in [
+            (
+                batch.exact_replay_summary(0).evaluation,
+                r#"{"status":"identity-budget-exhausted","observations":1,"limit":0}"#,
+            ),
+            (
+                batch
+                    .exact_replay_summary(MAX_RECORDS_CEILING + 1)
+                    .evaluation,
+                r#"{"status":"invalid-identity-limit"}"#,
+            ),
+            (
+                ReplayEvaluation::WrongHarness,
+                r#"{"status":"wrong-harness"}"#,
+            ),
+            // Allocation failure is injected at the projection boundary, not forced in the allocator.
+            (
+                ReplayEvaluation::AllocationFailure,
+                r#"{"status":"allocation-failure"}"#,
+            ),
+        ] {
+            assert_eq!(
+                super::fictional_file_payload::replay_json(&evaluation),
+                expected
+            );
+            let projected = super::fictional_file_payload::copy_replay_payload_json(
+                &claude_replay::ClaudeReplaySummary {
+                    raw: batch.summary(),
+                    evaluation,
+                },
+            );
+            assert_eq!(
+                raw_payload(&projected),
+                super::fictional_file_payload::copy_payload_json(&batch.summary())
+            );
+            assert!(projected.ends_with(&format!(",\"replay\":{expected}}}")));
+        }
+    }
+
     #[test]
     fn selected_copy_has_truthful_sanitized_provenance_and_one_attempt() {
         let tree = Tree::new();
@@ -50,7 +170,7 @@ mod tests {
         let reader = CopyReader::synthetic_test_root(Some(tree.0.clone()));
         let result = reader.run("selected/copy.jsonl").unwrap();
         assert_eq!(
-            result,
+            raw_payload(&result),
             include_str!("../fixtures/abf137-expected-payload.json").trim()
         );
         assert!(result.contains("\"provenance\":\"configured-windows-copy\""));
@@ -138,7 +258,7 @@ mod tests {
             let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
                 .run("copy.jsonl")
                 .unwrap();
-            assert_eq!(result, expected.trim());
+            assert_eq!(raw_payload(&result), expected.trim());
         }
     }
 
@@ -189,6 +309,7 @@ mod tests {
             .unwrap();
         assert!(result.contains("\"observations\":1024"));
         assert!(result.contains("\"withValidClaim\":1"));
+        assert!(result.contains("\"status\":\"evaluated\""));
         assert!(result.contains("\"amount\":\"120\""));
     }
 

@@ -1,3 +1,4 @@
+import type { ClaudeCopyReplay } from './claudeCopyReplay.ts';
 import * as React from 'react';
 import { aggregateSynthetic } from './syntheticAggregation.ts';
 import { syntheticBridge } from './syntheticBridge.ts';
@@ -170,6 +171,45 @@ function ClaudeSummaryDetails({ summary, fictional = false }: Readonly<{ summary
   </>;
 }
 
+function ClaudeCopyReplayDetails({ replay }: Readonly<{ replay: ClaudeCopyReplay }>): React.JSX.Element {
+  let unavailable: string;
+  switch (replay.status) {
+    case 'identity-budget-exhausted':
+      unavailable = `Replay evaluation exhausted: ${replay.observations} observations exceed the identity limit of ${replay.limit}.`; break;
+    case 'invalid-identity-limit': unavailable = 'Replay evaluation invalid: identity limit is invalid.'; break;
+    case 'wrong-harness': unavailable = 'Replay evaluation unavailable: wrong harness.'; break;
+    case 'allocation-failure': unavailable = 'Replay evaluation unavailable: allocation failure.'; break;
+    case 'evaluated':
+      return <div aria-label="Conservative exact-observation replay diagnostics">
+        <h3>Conservative exact-observation replay diagnostics</h3>
+        <p className="page-note">Basis: source-scoped exact observation claims v1, this batch only.
+          Equal retained evidence does not establish unique physical events, cross-file history identity or billable consumption.
+          Rejected, oversized and pending lines remain coverage limitations and may hide conflicts or further copies.</p>
+        <ul className="breakdown">
+          <li>Eligible observations: {replay.eligibleObservations}</li>
+          <li>Representatives: {replay.representatives}</li>
+          <li>Exact replay copies: {replay.exactReplayCopies}</li>
+          <li>Unresolved observations: {replay.unresolvedObservations}</li>
+        </ul>
+        <p className="page-note">Unresolved reasons overlap; do not add them as a count of observations.</p>
+        <ul className="breakdown">
+          <li>Invalid identity: {replay.unresolved.invalidIdentity}</li>
+          <li>Unsupported record type: {replay.unresolved.unsupportedRecordType}</li>
+          <li>Sidechain: {replay.unresolved.sidechain}</li>
+          <li>Invalid claims: {replay.unresolved.invalidClaims}</li>
+          <li>Conflicting evidence: {replay.unresolved.conflictingEvidence}</li>
+        </ul>
+        <p className="page-note">Eligible-subset token components, one representative per eligible group.
+          NOT the complete or billed usage total. Unresolved observations are excluded, never zero consumption.
+          Evaluated does not establish complete coverage.</p>
+        <ul className="breakdown">{claudeComponents.map(([id, label]) =>
+          <li key={id}>{label}: {claudeValueText(replay.components[id], false)}</li>)}</ul>
+      </div>;
+    default: replay satisfies never; throw new Error('Invalid replay state');
+  }
+  return <p className="page-note" role="status">{unavailable} No eligible-subset counts or tokens are available. Raw claims and coverage remain below.</p>;
+}
+
 function ClaudeCopyPanel({ state, onRun, onClear }: Readonly<{
   state: CopyDiagnosticState; onRun?: (relativePath: string) => void; onClear?: () => void;
 }>): React.JSX.Element {
@@ -209,6 +249,7 @@ function ClaudeCopyPanel({ state, onRun, onClear }: Readonly<{
       {state.summary.files.tooLarge > 0 || state.summary.files.byteBudget > 0 || state.summary.files.outputLimit > 0 ?
         <p className="page-note">A file or byte budget can prevent reading. Record budget exhaustion discards all claims from the file;
           no truncated prefix total is published. Restart is required for another attempt.</p> : null}
+      <ClaudeCopyReplayDetails replay={state.replay} />
       <ClaudeSummaryDetails summary={state.summary} />
     </> : null}
   </Region>;

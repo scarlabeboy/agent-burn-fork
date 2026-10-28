@@ -90,7 +90,7 @@ function sum(values: readonly number[]): number {
   return values.reduce((total, value) => total + value, 0);
 }
 
-function isComponent(value: unknown, observations: number): value is ComponentSummary {
+export function isComponent(value: unknown, observations: number): value is ComponentSummary {
   if (!isRecord(value) || !hasKeys(value, ['value', 'states']) || !counts(value.states, STATE_KEYS)) return false;
   const states = value.states as unknown as ClaimStates;
   // The states partition the observations; an explicit zero is a valid claim.
