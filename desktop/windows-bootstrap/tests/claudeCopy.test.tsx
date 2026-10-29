@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createClaudeCopyDiagnostic, isClaudeCopySummary, isClaudeCopyResult } from '../frontend/src/claudeCopyDiagnostic.ts';
-import type { ClaudeCopySummary } from '../frontend/src/claudeCopyDiagnostic.ts';
+import type { ClaudeCopySummary, CopyDiagnosticState } from '../frontend/src/claudeCopyDiagnostic.ts';
 import type { ComponentSummary } from '../frontend/src/fictionalClaudeBridge.ts';
 import { ShellView } from '../frontend/src/App.tsx';
 const fixture: unknown = JSON.parse(readFileSync(new URL('../fixtures/abf136-expected-payload.json', import.meta.url), 'utf8'));
@@ -187,6 +187,91 @@ const noObservations = {
   states: { valid: 0, validZero: 0, absent: 0, null: 0, wrongType: 0, outOfRange: 0, unsupported: 0 },
 } as const satisfies ComponentSummary;
 const emptyComponents = { input: noObservations, output: noObservations, cacheCreation: noObservations, cacheRead: noObservations };
+function visibleCopy(summary: ClaudeCopySummary): string {
+  return copyPanel(summary).split('<details')[0] ?? '';
+}
+test('manual reader precedes synthetic metrics and fictional scenarios', async () => {
+  const html = await renderResult(replayFixture);
+  assert.ok(html.indexOf('id="claude-copy-title"') < html.indexOf('aria-label="Overview metrics"'));
+  assert.ok(html.indexOf('id="claude-copy-title"') < html.indexOf('id="fictional-results-title"'));
+  assert.match(html, /Synthetic dashboard - demonstration only/u);
+});
+test('snapshot shows raw components with diagnostics collapsed by default', () => {
+  const visible = visibleCopy(copy);
+  for (const [label, value] of [['Input tokens', '17'], ['Output tokens', '3'], ['Cache creation tokens', '2'], ['Cache read tokens', '4']]) {
+    assert.ok(visible.includes(`<dt>${label}</dt><dd>${value}</dd>`));
+  }
+  assert.match(copyPanel(copy), /<details class="scenario copy-details"><summary>Token, parser and replay diagnostics<\/summary>/u);
+  assert.doesNotMatch(copyPanel(copy), /<details[^>]*\bopen/u);
+});
+for (const [name, value, expected] of [
+  ['no valid claims', { kind: 'no-valid-claims' }, 'No valid claims'],
+  ['explicit zero', { kind: 'sum', amount: '0' }, '0'],
+  ['large exact sum', { kind: 'sum', amount: '18446744073709551615' }, '18446744073709551615'],
+  ['overflow', { kind: 'overflow' }, 'Overflow - sum exceeds 64 bits'],
+  ['unavailable', { kind: 'indeterminate', reason: 'no-observations' }, 'Unavailable - no observations'],
+] as const satisfies readonly (readonly [string, ComponentSummary['value'], string])[]) {
+  test(`snapshot preserves ${name}`, () => {
+    const summary = { ...copy, components: { ...copy.components, input: { ...copy.components.input, value } } };
+    assert.ok(visibleCopy(summary).includes(`<dt>Input tokens</dt><dd>${expected}</dd>`));
+  });
+}
+test('partial coverage is visible without opening diagnostics', () => {
+  const visible = visibleCopy(copy);
+  assert.match(visible, /Records with valid claims: 2; without valid claims: 0/u);
+  assert.match(visible, /Files read: 1; rejected: 0/u);
+  assert.match(visible, /Excluded lines: 1 rejected, 0 oversized, 0 blank/u);
+  assert.match(visible, /Pending: 1 file\(s\), 10 bytes/u);
+  assert.match(visible, /Coverage limited/u);
+  assert.match(visibleCopy(noUsage), /Coverage limited/u);
+  assert.match(visibleCopy(replayFixture.raw), /No known coverage gaps; complete usage is not established/u);
+});
+test('compact replay distinguishes candidate observations from exact copies', async () => {
+  const result: unknown = JSON.parse(readFileSync(new URL('../fixtures/abf143-candidates-payload.json', import.meta.url), 'utf8'));
+  const visible = (await renderResult(result)).split('<details')[0] ?? '';
+  assert.match(visible, /Confirmed exact copies: 0/u);
+  assert.match(visible, /Unconfirmed matching-request candidate observations: 2/u);
+  assert.match(visible, /Unresolved observations: 2/u);
+  assert.match(visible, /Candidate observations are not duplicate copies or groups/u);
+});
+test('snapshot reports confirmed replay copies without replacing the raw token claims', async () => {
+  const visible = (await renderResult(replayFixture)).split('<details')[0] ?? '';
+  assert.match(visible, /Confirmed exact copies: 1/u);
+  assert.match(visible, /Unconfirmed matching-request candidate observations: 0/u);
+  assert.match(visible, /Unresolved observations: 0/u);
+  assert.match(visible, /<dt>Input tokens<\/dt><dd>20<\/dd>/u);
+});
+test('copy results do not change synthetic environment or Computer metrics', () => {
+  for (const environment of ['windows', 'selected-wsl', 'computer'] as const) {
+    const render = (loaded: boolean): string => renderToStaticMarkup(createElement(ShellView, {
+      selection: { environment, harness: 'claude-code' }, onSelectEnvironment: () => {}, onSelectHarness: () => {},
+      copyDiagnostic: (loaded ? { status: 'copy', attempted: true, summary: copy, replay: evaluated }
+        : { status: 'idle', attempted: false }) satisfies CopyDiagnosticState,
+    }));
+    const metrics = (html: string) => [...html.matchAll(/<p class="metric__value">(.*?)<\/p>/gu)].map((match) => match[1]);
+    assert.deepEqual(metrics(render(true)), metrics(render(false)));
+    assert.deepEqual(metrics(render(true)), ['Unavailable', 'Unavailable', 'Unavailable', 'Unavailable']);
+  }
+});
+test('selection changes hide and restore the snapshot; Clear removes snapshot and diagnostics', async () => {
+  let calls = 0;
+  const reader = createClaudeCopyDiagnostic(async () => { calls++; return golden; });
+  await reader.run('copy.jsonl');
+  const render = (environment: 'windows' | 'computer' | 'selected-wsl', harness: 'claude-code' | 'codex') =>
+    renderToStaticMarkup(createElement(ShellView, {
+      selection: { environment, harness }, onSelectEnvironment: () => {}, onSelectHarness: () => {},
+      copyDiagnostic: reader.getSnapshot(),
+    }));
+  const before = render('windows', 'claude-code');
+  assert.match(before, /Manual copy session snapshot/u);
+  assert.doesNotMatch(render('computer', 'claude-code'), /Manual copy session snapshot/u);
+  assert.doesNotMatch(render('selected-wsl', 'claude-code'), /Manual copy session snapshot/u);
+  assert.doesNotMatch(render('windows', 'codex'), /Manual copy session snapshot/u);
+  assert.equal(render('windows', 'claude-code'), before);
+  assert.equal(calls, 1);
+  reader.clear();
+  assert.doesNotMatch(render('windows', 'claude-code'), /Manual copy session snapshot|Token, parser and replay diagnostics|data-component=/u);
+});
 async function renderResult(result: unknown): Promise<string> {
   const reader = createClaudeCopyDiagnostic(async () => JSON.stringify(result));
   await reader.run('copy.jsonl');

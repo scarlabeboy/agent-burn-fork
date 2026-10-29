@@ -232,6 +232,45 @@ function ClaudeCopyReplayDetails({ replay }: Readonly<{ replay: ClaudeCopyReplay
   return <p className="page-note" role="status">{unavailable} No eligible-subset counts or tokens are available. Raw claims and coverage remain below.</p>;
 }
 
+/** Raw claims only: never use the replay subset for the session snapshot. */
+function ClaudeCopySnapshot({ summary, replay }: Readonly<{
+  summary: ClaudeClaimSummary; replay: ClaudeCopyReplay;
+}>): React.JSX.Element {
+  const limited = Object.values(summary.caveats).some(Boolean)
+    || summary.records.withoutValidClaim > 0 || summary.records.withMissingClaim > 0
+    || summary.records.withNullClaim > 0 || summary.records.withInvalidClaim > 0;
+  return <>
+    <div aria-label="Manual copy session snapshot">
+      <h4>Raw observed token claims</h4>
+      <dl className="copy-tokens">{claudeComponents.map(([id, label]) => {
+        const component = summary.components[id];
+        return <div className="metric" key={id}>
+          <dt>{label}</dt><dd>{component.value.kind === 'sum' ? component.value.amount : claudeValueText(component, false)}</dd>
+        </div>;
+      })}</dl>
+    </div>
+    <p className="page-note">Every retained record counts, including repeated claims. Components stay separate; no combined total.</p>
+    <ul className="breakdown" aria-label="Snapshot reading and coverage">
+      <li>Records with valid claims: {summary.records.withValidClaim}; without valid claims: {summary.records.withoutValidClaim}</li>
+      <li>Files read: {summary.files.read}; rejected: {summary.files.rejected}</li>
+      <li>Excluded lines: {summary.lines.rejected.total} rejected, {summary.lines.oversized} oversized, {summary.lines.blank} blank</li>
+      <li>Pending: {summary.lines.filesWithPendingTail} file(s), {summary.lines.pendingTailBytes} bytes (not parsed)</li>
+      <li>Skipped entries: {summary.skipped.total}; may hide data: {summary.skipped.mayHideData}</li>
+    </ul>
+    <p className="page-note">{limited ? 'Coverage limited - gaps or missing token components remain.'
+      : 'No known coverage gaps; complete usage is not established.'}</p>
+    {replay.status === 'evaluated' ? <>
+      <ul className="breakdown" aria-label="Snapshot replay status">
+        <li>Confirmed exact copies: {replay.exactReplayCopies}</li>
+        <li>Unconfirmed matching-request candidate observations: {replay.candidates.matchingRequest}</li>
+        <li>Unresolved observations: {replay.unresolvedObservations}</li>
+      </ul>
+      <p className="page-note">Exact copies use retained evidence in this batch only. Candidate observations are not duplicate copies or groups;
+        they overlap unresolved observations. No physical event uniqueness is established.</p>
+    </> : <p className="page-note">Replay counts unavailable ({replay.status}). See diagnostics for the reason; raw claims remain separate.</p>}
+  </>;
+}
+
 function ClaudeCopyPanel({ state, onRun, onClear }: Readonly<{
   state: CopyDiagnosticState; onRun?: (relativePath: string) => void; onClear?: () => void;
 }>): React.JSX.Element {
@@ -271,8 +310,13 @@ function ClaudeCopyPanel({ state, onRun, onClear }: Readonly<{
       {state.summary.files.tooLarge > 0 || state.summary.files.byteBudget > 0 || state.summary.files.outputLimit > 0 ?
         <p className="page-note">A file or byte budget can prevent reading. Record budget exhaustion discards all claims from the file;
           no truncated prefix total is published. Restart is required for another attempt.</p> : null}
-      <ClaudeCopyReplayDetails replay={state.replay} />
-      <ClaudeSummaryDetails summary={state.summary} />
+      <ClaudeCopySnapshot summary={state.summary} replay={state.replay} />
+      <details className="scenario copy-details"><summary>Token, parser and replay diagnostics</summary>
+        <div className="copy-details__content" tabIndex={0} role="region" aria-label="Detailed copy diagnostics">
+          <ClaudeCopyReplayDetails replay={state.replay} />
+          <ClaudeSummaryDetails summary={state.summary} />
+        </div>
+      </details>
     </> : null}
   </Region>;
 }
@@ -349,6 +393,9 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
           <p className="page-scope">{copyDiagnostic !== undefined && environment.id === 'windows'
             ? 'Windows dashboard fixture. Automatic collection disabled; manual copy reader below is separate.' : environment.scope}</p>
           <p className="page-note">{copyDiagnostic === undefined ? shellText.explanation : 'Dashboard is synthetic; manual copy reader is separate. No account, quota or spending is observed.'}</p>
+          {copyDiagnostic !== undefined && environment.id === 'windows' && harness.id === 'claude-code'
+            ? <ClaudeCopyPanel state={copyDiagnostic} onRun={onRunCopyDiagnostic} onClear={onClearCopyDiagnostic} /> : null}
+          {copyDiagnostic !== undefined ? <h2 className="section-title">Synthetic dashboard - demonstration only</h2> : null}
           <p className="page-note" role="status">
             {bridgeState.status === 'synthetic'
               ? 'Local synthetic bridge responded · DEMO / SYNTHETIC · collection disabled'
@@ -387,9 +434,6 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
               ))}
             </ul>
           </Region>
-
-          {copyDiagnostic !== undefined && environment.id === 'windows' && harness.id === 'claude-code'
-            ? <ClaudeCopyPanel state={copyDiagnostic} onRun={onRunCopyDiagnostic} onClear={onClearCopyDiagnostic} /> : null}
 
           {fileDiagnostic !== undefined && environment.id === 'selected-wsl' && harness.id === 'claude-code' ? (
             <Region id="fictional-file-read" title="Fictional one-shot Claude file-read diagnostic">

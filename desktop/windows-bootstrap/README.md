@@ -220,6 +220,17 @@ are NOT_RUN. CI and a separately authorized Windows visual check remain separate
 
 ## Explicit Windows Claude copy diagnostic (ABF137)
 
+ABF144 puts this reader before the synthetic dashboard and fictional scenarios.
+After a validated result, a compact session snapshot shows four separate raw
+observed token components, records with and without valid claims, file and line
+coverage, pending tails, and replay status. Unconfirmed matching-request counts
+refer to observations, never duplicate copies or groups. Decimal token strings
+retain 64-bit precision; zero, no valid claims, unavailable and overflow remain
+distinct. **Token, parser and replay diagnostics** expands the existing details.
+Clear removes both views and leaves the one-attempt limit consumed. Selection
+changes only hide or restore the retained result; they never read again. The
+capture's current freshness and original source/environment remain unknown.
+
 Windows / Claude Code has a separate **Read selected copy once** action and
 **Clear copy result** action. Its result never enters dashboard totals, historical
 fictional panels, environment aggregation or Computer. This is a diagnostic-local
