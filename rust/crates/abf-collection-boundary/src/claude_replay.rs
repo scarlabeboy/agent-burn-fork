@@ -49,6 +49,35 @@ pub struct ConflictCounts {
     pub session_message_related: u64,
 }
 
+/// ABF143: overlapping observation counts over metadata-only conflicting pairs.
+/// Matching claims are unconfirmed candidates, never a deduplication decision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CandidateCounts {
+    pub matching_request: u64,
+    pub request_mismatch: u64,
+    pub missing_identity: u64,
+    pub other_metadata: u64,
+}
+
+// Called only for metadata-only conflicts with identical token and parser evidence.
+fn candidate_category(a: &ClaudeObservation, b: &ClaudeObservation) -> usize {
+    if !identity_valid(a) || !identity_valid(b) {
+        return 2;
+    }
+    if eligible(a)
+        && eligible(b)
+        && same_text(&a.session_id, &b.session_id)
+        && same_text(&a.message_id, &b.message_id)
+        && same_text(&a.model, &b.model)
+        && a.correlation == b.correlation
+        && a.message == b.message
+    {
+        // Only UUID, timestamp and (for the mismatch category) request may differ.
+        return usize::from(!same_text(&a.request_id, &b.request_id));
+    }
+    3
+}
+
 // Exhaustive destructuring makes new retained fields require an attribution decision.
 // These differences explain the existing full equality decision; they never replace it.
 fn evidence_differences(a: &ClaudeObservation, b: &ClaudeObservation) -> [bool; 3] {
@@ -103,6 +132,7 @@ pub struct ReplayClaims {
     pub unresolved_observations: u64,
     pub unresolved: UnresolvedCounts,
     pub conflicts: ConflictCounts,
+    pub candidates: CandidateCounts,
     /// Sums of one retained observation per eligible group only. Unresolved claims are
     /// excluded here, remain in `raw`, and must never be interpreted as zero consumption.
     pub components: ClaudeComponents,
@@ -202,15 +232,20 @@ fn evaluate(batch: &ClaudeBatch, observations: u64, limit: usize) -> ReplayEvalu
     ];
     let mut unresolved = UnresolvedCounts::default();
     let mut conflicts = ConflictCounts::default();
+    let mut candidates = CandidateCounts::default();
     let (mut eligible_observations, mut representatives, mut replay_observations) = (0, 0, 0);
     for (index, o) in entries.iter().enumerate() {
         let mut conflict = false;
         let mut reasons = [false; 6];
+        let mut candidate_reasons = [false; 4];
         for (peer_index, peer) in entries.iter().enumerate() {
             // Preserve the ABF140B predicate exactly; scan all peers for attribution.
             if peer_index != index && related(o, peer) && (!eligible(peer) || *o != *peer) {
                 conflict = true;
                 let [metadata, tokens, parser] = evidence_differences(o, peer);
+                if metadata && !tokens && !parser {
+                    candidate_reasons[candidate_category(o, peer)] = true;
+                }
                 let flags = [
                     !eligible(peer),
                     metadata,
@@ -224,6 +259,17 @@ fn evaluate(batch: &ClaudeBatch, observations: u64, limit: usize) -> ReplayEvalu
                     *reason |= flag;
                 }
             }
+        }
+        for (count, reason) in [
+            &mut candidates.matching_request,
+            &mut candidates.request_mismatch,
+            &mut candidates.missing_identity,
+            &mut candidates.other_metadata,
+        ]
+        .into_iter()
+        .zip(candidate_reasons)
+        {
+            *count += u64::from(reason);
         }
         for (count, reason) in [
             &mut conflicts.ineligible_peer,
@@ -269,6 +315,7 @@ fn evaluate(batch: &ClaudeBatch, observations: u64, limit: usize) -> ReplayEvalu
         unresolved_observations: observations - eligible_observations,
         unresolved,
         conflicts,
+        candidates,
         components: ClaudeComponents {
             input,
             output,

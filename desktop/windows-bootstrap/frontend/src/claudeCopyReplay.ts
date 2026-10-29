@@ -8,6 +8,8 @@ export type ClaudeCopyReplay =
       invalidClaims: number; conflictingEvidence: number }>;
     conflicts: Readonly<{ ineligiblePeer: number; identityMetadata: number; tokenFields: number;
       parserEvidence: number; uuidRelated: number; sessionMessageRelated: number }>;
+    candidates: Readonly<{ matchingRequest: number; requestMismatch: number;
+      missingIdentity: number; otherMetadata: number }>;
     components: Readonly<Record<ComponentId, ComponentSummary>> }>
   | Readonly<{ status: 'identity-budget-exhausted'; observations: number; limit: number }>
   | Readonly<{ status: 'invalid-identity-limit' | 'wrong-harness' | 'allocation-failure' }>;
@@ -32,7 +34,7 @@ export function isClaudeCopyReplay(value: unknown, raw: ClaudeClaimSummary): val
         && value.observations === raw.records.observations && value.observations > value.limit;
     case 'evaluated': {
       if (!keys(value, ['status', 'basis', 'eligibleObservations', 'representatives', 'exactReplayCopies',
-        'unresolvedObservations', 'unresolved', 'conflicts', 'components'])
+        'unresolvedObservations', 'unresolved', 'conflicts', 'candidates', 'components'])
         || value.basis !== 'source-scoped-exact-observation-claims-v1'
         || !count(value.eligibleObservations) || !count(value.representatives)
         || !count(value.exactReplayCopies) || !count(value.unresolvedObservations)
@@ -54,6 +56,12 @@ export function isClaudeCopyReplay(value: unknown, raw: ClaudeClaimSummary): val
         || ![...causes, ...relations].every((name) => count(conflicts[name]) && conflicts[name] <= conflictCount)
         || causes.reduce((sum, name) => sum + Number(conflicts[name]), 0) < conflictCount
         || relations.reduce((sum, name) => sum + Number(conflicts[name]), 0) < conflictCount) return false;
+      const candidates = value.candidates;
+      const categories = ['matchingRequest', 'requestMismatch', 'missingIdentity', 'otherMetadata'] as const;
+      if (!record(candidates) || !keys(candidates, categories)
+        || !categories.every((name) => count(candidates[name]) && candidates[name] <= Number(conflicts.identityMetadata))
+        || Number(candidates.matchingRequest) > Number(conflicts.sessionMessageRelated)
+        || Number(candidates.requestMismatch) > Number(conflicts.sessionMessageRelated)) return false;
       const components = value.components;
       const ids = ['input', 'output', 'cacheCreation', 'cacheRead'] as const;
       return record(components) && keys(components, ids) && ids.every((id) => {

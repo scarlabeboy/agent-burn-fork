@@ -484,3 +484,27 @@ mod tests {
         }
     }
 }
+
+#[test]
+fn unconfirmed_candidate_transport_is_private_and_preserves_raw_claims() {
+    use abf_collection_boundary::*;
+    let id = |s| OpaqueId::new(s).unwrap();
+    let batch = collect_claude_jsonl_memory(
+        EnvironmentIdentity::windows(id("fictional-environment")),
+        SourceInstance::new(id("fictional-source"), Harness::ClaudeCode),
+        &ScanRun::new(id("fictional-run"), CaptureTime::NotRecorded),
+        &[include_bytes!("../fixtures/abf143-candidates.jsonl")],
+        ClaudeReadLimits::default(),
+    )
+    .unwrap();
+    let payload =
+        fictional_file_payload::copy_replay_payload_json(&batch.exact_replay_summary(1024));
+    assert_eq!(
+        payload,
+        include_str!("../fixtures/abf143-candidates-payload.json").trim()
+    );
+    assert!(payload.len() <= 16384);
+    assert!(!payload.contains("fictional-"));
+    assert!(!payload.contains("PRIVATE"));
+    assert!(!payload.contains("2026-"));
+}

@@ -469,3 +469,38 @@ No per-record attribution or retained values are exported. All peers are visited
 instead of stopping at the first conflict; time remains bounded O(n^2), with six
 boolean flags per observation being evaluated and six aggregate integer counters,
 no additional heap allocation and unchanged collection/identity budgets.
+
+### Unconfirmed metadata-only usage candidates (ABF143)
+
+Evaluated claims additionally carry `candidates: CandidateCounts`. This diagnostic
+reuses the ABF142 peer scan and retained-field differences. It examines only
+conflicting pairs with differing metadata, identical retained token fields
+(including container/field states, flat cache claims and breakdown children),
+and identical parser status/diagnostics. Exact copies and token/parser-differing
+pairs do not contribute. A pair falls into one of these categories:
+
+- `matching_request`: both observations pass existing individual ABF140B
+  eligibility, with matching session, message, request and model evidence,
+  caller correlation and message-container state. Only valid UUID and timestamp
+  claims may differ. These are **unconfirmed candidate repeated usage claims**.
+- `request_mismatch`: the same conditions except valid request IDs differ.
+  This is unresolved reuse, not a replay or a sidechain inference.
+- `missing_identity`: either observation fails the existing identity validity
+  checks, including missing, invalid, empty or over-256-byte evidence. Invalid
+  identity that also changes parser evidence is outside this metadata-only scope
+  and remains explained by the existing parser-evidence counter.
+- `other_metadata`: remaining metadata-only conflicting pairs, including model
+  differences, sidechains, unsupported record types or incomplete claims.
+
+Each counter counts an observation once if it has at least one qualifying peer.
+Categories are exclusive per pair, but overlap across peers. They are not a
+partition of conflicts, pair counts, group counts, or a count of extra copies.
+A candidate can also have token-differing or ineligible peers; candidate matches
+never override those conflicts. No transitive identity, lifecycle, supersession,
+later/larger preference, uniqueness, billing or original provenance is inferred.
+UUID and timestamp differences are metadata differences, never replay proof.
+
+No accounting changes: raw sums, exact-replay eligibility and subset components,
+conflict counts and coverage remain authoritative and unchanged. No observations
+are discarded. The diagnostic allocates no additional collection, parses no
+records again, and retains existing batch, comparison and parser budgets.

@@ -319,3 +319,30 @@ test('Rust overlap golden crosses strict validation and renders attribution with
   assert.match(markup, /13 observed claims/u);
   assert.doesNotMatch(markup, /PRIVATE|fictional-time|fictional-model|unknown_tokens/u);
 });
+
+test('unconfirmed candidate fixture validates, renders only counts and clears', async () => {
+  const payload = readFileSync(new URL('../fixtures/abf143-candidates-payload.json', import.meta.url), 'utf8');
+  const result: unknown = JSON.parse(payload);
+  assert.ok(isClaudeCopyResult(result));
+  assert.equal(result.replay.status, 'evaluated');
+  if (result.replay.status !== 'evaluated') assert.fail('expected evaluated candidates');
+  const replay = result.replay;
+  const reader = createClaudeCopyDiagnostic(async () => payload);
+  await reader.run('PRIVATE-copy.jsonl');
+  const render = () => renderToStaticMarkup(createElement(ShellView, {
+    selection: { environment: 'windows', harness: 'claude-code' },
+    onSelectEnvironment: () => {}, onSelectHarness: () => {}, copyDiagnostic: reader.getSnapshot(),
+  }));
+  const markup = render();
+  for (const label of ['Matching-request candidates (unconfirmed): 2', 'Request-ID mismatches: 0',
+    'Missing or invalid identity evidence: 0', 'Other unresolved metadata: 0',
+    'do not establish replays', 'never discard observations']) assert.ok(markup.includes(label));
+  assert.doesNotMatch(markup, /PRIVATE|fictional-uuid|2026-01/u);
+  for (const candidates of [undefined, {}, { ...replay.candidates, identifier: 'PRIVATE' },
+    { ...replay.candidates, matchingRequest: -1 }, { ...replay.candidates, matchingRequest: 0.5 },
+    { ...replay.candidates, matchingRequest: 3 }, { ...replay.candidates, matchingRequest: 1025 }]) {
+    assert.equal(isClaudeCopyResult({ ...result, replay: { ...replay, candidates } }), false);
+  }
+  reader.clear();
+  assert.doesNotMatch(render(), /Matching-request candidates/u);
+});

@@ -485,3 +485,116 @@ fn overlapping_conflict_reasons_count_each_observation_once_across_peers() {
         claims(batch(&[&other, RECORD, RECORD]).exact_replay_summary(3))
     );
 }
+
+#[test]
+fn metadata_only_candidates_are_unconfirmed_and_preserve_accounting() {
+    let other = RECORD
+        .replace("fictional-uuid-a", "fictional-uuid-b")
+        .replace("03:04:05Z", "03:04:06Z");
+    let b = batch(&[RECORD, &other]);
+    let result = b.exact_replay_summary(2);
+    assert_eq!(result.raw, b.summary());
+    let c = claims(result);
+    assert_eq!(c.candidates.matching_request, 2);
+    assert_eq!(c.candidates.request_mismatch, 0);
+    assert_eq!(c.candidates.missing_identity, 0);
+    assert_eq!(c.candidates.other_metadata, 0);
+    assert_eq!(c.unresolved.conflicting_evidence, 2);
+    assert_eq!(c.eligible_observations, 0);
+    assert_eq!(c.replay_observations, 0);
+}
+
+#[test]
+fn metadata_candidates_separate_requests_missing_identity_and_other_metadata() {
+    for (other, expected) in [
+        (
+            RECORD.replace("fictional-request", "other-request"),
+            [0, 2, 0, 0],
+        ),
+        (
+            RECORD.replace("\"requestId\":\"fictional-request\",", ""),
+            [0, 0, 2, 0],
+        ),
+        (
+            RECORD.replace("\"uuid\":\"fictional-uuid-a\"", "\"uuid\":null"),
+            [0, 0, 2, 0],
+        ),
+        // Wrong-type session evidence also changes parser diagnostics, outside metadata-only scope.
+        (
+            RECORD.replace("\"sessionId\":\"fictional-session\"", "\"sessionId\":[]"),
+            [0, 0, 0, 0],
+        ),
+        (
+            RECORD.replace("\"id\":\"fictional-message\"", "\"id\":\"\""),
+            [0, 0, 2, 0],
+        ),
+        (
+            RECORD.replace("fictional-model", "other-model"),
+            [0, 0, 0, 2],
+        ),
+        (
+            RECORD.replace("\"isSidechain\":false", "\"isSidechain\":true"),
+            [0, 0, 0, 2],
+        ),
+        (
+            RECORD.replace("\"type\":\"assistant\"", "\"type\":\"progress\""),
+            [0, 0, 0, 2],
+        ),
+        (RECORD.replace("03:04:05Z", "03:04:06Z"), [2, 0, 0, 0]),
+        (
+            RECORD.replace("fictional-uuid-a", "other-uuid"),
+            [2, 0, 0, 0],
+        ),
+    ] {
+        let c = claims(batch(&[RECORD, &other]).exact_replay_summary(2));
+        assert_eq!(
+            [
+                c.candidates.matching_request,
+                c.candidates.request_mismatch,
+                c.candidates.missing_identity,
+                c.candidates.other_metadata,
+            ],
+            expected,
+            "synthetic case: {other}"
+        );
+        assert_eq!(c.unresolved.conflicting_evidence, 2);
+        assert_eq!(c.replay_observations, 0);
+    }
+}
+
+#[test]
+fn changed_usage_or_parser_evidence_never_forms_metadata_only_candidates() {
+    for other in [
+        RECORD.replace("\"input_tokens\":10", "\"input_tokens\":12"),
+        RECORD.replace("\"input_tokens\":10", "\"input_tokens\":null"),
+        RECORD.replace("\"input_tokens\":10", "\"unknown_tokens\":1,\"input_tokens\":10"),
+        RECORD.replace("\"cache_creation_input_tokens\":11", "\"cache_creation_input_tokens\":11,\"cache_creation\":{\"ephemeral_5m_input_tokens\":11,\"ephemeral_1h_input_tokens\":0}"),
+    ] {
+        let other = other.replace("fictional-uuid-a", "other-uuid");
+        let c = claims(batch(&[RECORD, &other]).exact_replay_summary(2));
+        assert_eq!(c.candidates, CandidateCounts::default());
+        assert_eq!(c.eligible_observations, 0);
+    }
+    assert_eq!(
+        claims(batch(&[RECORD, RECORD]).exact_replay_summary(2)).candidates,
+        CandidateCounts::default()
+    );
+}
+
+#[test]
+fn candidate_categories_overlap_across_peers_without_transitive_deduplication() {
+    let metadata = RECORD.replace("fictional-uuid-a", "other-uuid");
+    let request = RECORD.replace("fictional-request", "other-request");
+    let changed = RECORD.replace("\"input_tokens\":10", "\"input_tokens\":12");
+    let records = [RECORD, RECORD, &metadata, &request, &changed];
+    let c = claims(batch(&records).exact_replay_summary(5));
+    assert_eq!(c.candidates.matching_request, 3);
+    assert_eq!(c.candidates.request_mismatch, 4);
+    assert_eq!(c.conflicts.token_fields, 5);
+    assert_eq!(c.unresolved.conflicting_evidence, 5);
+    assert_eq!(c.eligible_observations, 0);
+    assert_eq!(
+        c,
+        claims(batch(&[&changed, &request, &metadata, RECORD, RECORD]).exact_replay_summary(5))
+    );
+}

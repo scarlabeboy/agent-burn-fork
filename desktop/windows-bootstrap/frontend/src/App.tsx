@@ -210,6 +210,17 @@ function ClaudeCopyReplayDetails({ replay }: Readonly<{ replay: ClaudeCopyReplay
           <li>UUID-related conflict: {replay.conflicts.uuidRelated}</li>
           <li>Session/message-related conflict: {replay.conflicts.sessionMessageRelated}</li>
         </ul>
+        <p className="page-note">Metadata-only conflicting pairs with equal retained token and parser evidence:
+          matching-request candidates require accepted non-sidechain observations, matching valid session, message, request
+          and model evidence, and complete matching usage claims. They are unconfirmed and do not establish replays. UUID or timestamp differences
+          are metadata differences, never proof of repetition. Counts overlap across peers; never discard observations
+          or use these counts as unique-token totals or billed usage.</p>
+        <ul className="breakdown">
+          <li>Matching-request candidates (unconfirmed): {replay.candidates.matchingRequest}</li>
+          <li>Request-ID mismatches: {replay.candidates.requestMismatch}</li>
+          <li>Missing or invalid identity evidence: {replay.candidates.missingIdentity}</li>
+          <li>Other unresolved metadata: {replay.candidates.otherMetadata}</li>
+        </ul>
         <p className="page-note">Eligible-subset token components, one representative per eligible group.
           NOT the complete or billed usage total. Unresolved observations are excluded, never zero consumption.
           Evaluated does not establish complete coverage.</p>

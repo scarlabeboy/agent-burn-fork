@@ -275,6 +275,24 @@ pub(super) fn replay_json(evaluation: &claude_replay::ReplayEvaluation) -> Strin
                     ]),
                 ),
                 (
+                    "candidates",
+                    object(&[
+                        (
+                            "matchingRequest",
+                            number(claims.candidates.matching_request),
+                        ),
+                        (
+                            "requestMismatch",
+                            number(claims.candidates.request_mismatch),
+                        ),
+                        (
+                            "missingIdentity",
+                            number(claims.candidates.missing_identity),
+                        ),
+                        ("otherMetadata", number(claims.candidates.other_metadata)),
+                    ]),
+                ),
+                (
                     "components",
                     object(&[
                         ("input", component(&claims.components.input)),

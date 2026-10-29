@@ -367,7 +367,7 @@ ClaudeCopyResult {
 
 - `{ status: "evaluated", basis: "source-scoped-exact-observation-claims-v1",
   eligibleObservations, representatives, exactReplayCopies,
-  unresolvedObservations, unresolved, conflicts, components }`.
+  unresolvedObservations, unresolved, conflicts, candidates, components }`.
 - `{ status: "identity-budget-exhausted", observations, limit }`.
 - `{ status: "invalid-identity-limit" }`.
 - `{ status: "wrong-harness" }`.
@@ -450,3 +450,37 @@ cause, relation type, identical ineligible peers and conflict-free observations.
 A 1024-record synthetic case verifies the unchanged transport cap. These tests
 establish no cause for the native ABF141 conflicts. Native Windows/IPC/WebView2
 validation still requires a separately authorized build and user-controlled run.
+
+### Unconfirmed usage candidates (ABF143)
+
+The evaluated replay payload additionally requires exactly four numerical
+`candidates` fields: `matchingRequest`, `requestMismatch`, `missingIdentity`,
+`otherMetadata`. They count observations with metadata-only conflicting peers,
+not pairs, unique usage or replay copies. Counts overlap across peers; each is
+bounded by `conflicts.identityMetadata`, and the first two are also bounded by
+`conflicts.sessionMessageRelated`. Extra fields and invalid counters are refused.
+
+Matching-request candidates require individually eligible accepted non-sidechain
+observations, valid matching session/message/request/model evidence, identical
+caller correlation and message state, and identical complete retained usage and
+parser evidence. Only valid UUID/timestamp claims may differ. Request mismatches
+meet the same conditions except request IDs differ. Missing/invalid identity
+and remaining metadata-only cases have separate counters. Token/parser-differing
+pairs are outside this diagnostic. See the boundary README's ABF143 section for
+precise scope, including invalid identity that changes parser evidence.
+
+The panel explicitly calls candidates unconfirmed. No observation is discarded;
+raw sums, exact-replay semantics, conflict counts, coverage, one-shot reading,
+Clear and the 16 KiB transport cap are unchanged. No unique-token total or billed
+usage is calculated from candidates. The diagnostic-local schema version stays
+1; the Rust producer and strict frontend consumer must be deployed together.
+
+`fixtures/abf143-candidates.jsonl` contains two synthetic observations differing
+in UUID and timestamp with equal request and complete usage claims. The sanitized
+payload reports two unconfirmed matching-request candidates, two unresolved
+conflicts, no exact replay copies and raw claims of 20/6/22/8. Its golden is
+checked by actual Rust serialization and frontend validation/rendering/Clear.
+Other synthetic tests cover request/token changes, missing/invalid identity,
+sidechains and overlapping candidate relations. These tests do not classify
+ABF142's private native observations or establish duplication. Native Windows
+IPC/WebView2 validation remains a separate authorized check.
