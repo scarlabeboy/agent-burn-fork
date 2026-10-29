@@ -367,7 +367,7 @@ ClaudeCopyResult {
 
 - `{ status: "evaluated", basis: "source-scoped-exact-observation-claims-v1",
   eligibleObservations, representatives, exactReplayCopies,
-  unresolvedObservations, unresolved, components }`.
+  unresolvedObservations, unresolved, conflicts, components }`.
 - `{ status: "identity-budget-exhausted", observations, limit }`.
 - `{ status: "invalid-identity-limit" }`.
 - `{ status: "wrong-harness" }`.
@@ -414,3 +414,39 @@ failure is not forced in the allocator. Linux synthetic tests compile the actual
 reader and serializer; they do not compile Tauri or exercise native IPC.
 Native Windows compilation/run, WebView2 transport/interaction, Windows 10/11
 filesystem checks, native WSL collection and GitHub Actions are NOT_RUN.
+
+### Aggregate conflict explanation (ABF142)
+
+The evaluated replay variant now requires an exact `conflicts` object containing
+six numeric counters: `ineligiblePeer`, `identityMetadata`, `tokenFields`,
+`parserEvidence`, `uuidRelated` and `sessionMessageRelated`. Failure variants and
+the enclosing/raw schema v1 remain unchanged. Backend and frontend must be built
+together; the strict frontend rejects older evaluated payloads missing this object.
+
+Each counter counts an observation at most once, over all its conflicting peers.
+The first four explain the unchanged comparison: an ineligible peer; differing
+retained identity/metadata; differing token fields/container states, including
+flat/breakdown evidence; and differing parser status/diagnostics. The last two
+count observations with a conflicting peer related by UUID or session/message.
+Only conflicts contribute. Ineligible-peer attribution is directional. Reasons
+and relations overlap, potentially through different peers, so they cannot be
+summed as unique observations, pairs or physical events. See the collection
+boundary README's ABF142 section for the exact retained-field categories.
+
+The frontend requires all six fixed keys, integer counts in 0..=1024, each at
+most `conflictingEvidence`, and coverage of that count by both the cause counters
+and relation counters. Only numeric counts and fixed labels cross the IPC boundary.
+The existing 16384-character cap, raw counting, one-shot request, Clear suppression,
+collection permissions and limits remain unchanged. All peers are scanned for
+attribution with fixed additional stack storage and unchanged O(n^2) bounds.
+
+`fixtures/abf142-conflicts.jsonl` contains three fictional observations with
+overlapping metadata, token and parser evidence differences. Its sanitized
+`abf142-conflicts-payload.json` is checked against the actual Rust copy reader and
+rendered by frontend tests. Raw input/output/cache-creation/cache-read claims
+remain 30/13/33/12; all three observations remain conflicting and unresolved,
+with no representative or replay copy. Additional focused cases isolate each
+cause, relation type, identical ineligible peers and conflict-free observations.
+A 1024-record synthetic case verifies the unchanged transport cap. These tests
+establish no cause for the native ABF141 conflicts. Native Windows/IPC/WebView2
+validation still requires a separately authorized build and user-controlled run.

@@ -199,6 +199,17 @@ function ClaudeCopyReplayDetails({ replay }: Readonly<{ replay: ClaudeCopyReplay
           <li>Invalid claims: {replay.unresolved.invalidClaims}</li>
           <li>Conflicting evidence: {replay.unresolved.conflictingEvidence}</li>
         </ul>
+        <p className="page-note">Conflict attribution: Each counter counts an observation once if it has at least one
+          conflicting peer with that reason or relation. Reasons and relations overlap, including across peers;
+          do not add them as unique observations, pairs or physical events. Ineligible peer counts are directional.</p>
+        <ul className="breakdown">
+          <li>Related ineligible peer: {replay.conflicts.ineligiblePeer}</li>
+          <li>Differing identity or metadata: {replay.conflicts.identityMetadata}</li>
+          <li>Differing token fields: {replay.conflicts.tokenFields}</li>
+          <li>Differing parser evidence: {replay.conflicts.parserEvidence}</li>
+          <li>UUID-related conflict: {replay.conflicts.uuidRelated}</li>
+          <li>Session/message-related conflict: {replay.conflicts.sessionMessageRelated}</li>
+        </ul>
         <p className="page-note">Eligible-subset token components, one representative per eligible group.
           NOT the complete or billed usage total. Unresolved observations are excluded, never zero consumption.
           Evaluated does not establish complete coverage.</p>

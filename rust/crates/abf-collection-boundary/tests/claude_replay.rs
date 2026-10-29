@@ -55,6 +55,7 @@ fn distinct_turns_with_equal_claims_are_not_merged() {
         .replace("fictional-uuid-a", "fictional-uuid-b");
     let c = claims(batch(&[RECORD, &other]).exact_replay_summary(2));
     assert_eq!(c.representatives, 2);
+    assert_eq!(c.conflicts, ConflictCounts::default());
     assert_eq!(c.replay_observations, 0);
     assert_eq!(
         c.components.input.value,
@@ -133,6 +134,7 @@ fn isolated_ineligible_observation_is_not_a_conflict_with_itself() {
     assert_eq!(c.unresolved_observations, 1);
     assert_eq!(c.unresolved.sidechain, 1);
     assert_eq!(c.unresolved.conflicting_evidence, 0);
+    assert_eq!(c.conflicts, ConflictCounts::default());
 }
 
 #[test]
@@ -178,6 +180,10 @@ fn cache_claims_compare_full_evidence_and_never_add_flat_to_breakdown() {
         ComponentValue::ReportedClaimSum(4)
     );
     let c = claims(batch(&[RECORD, &split]).exact_replay_summary(2));
+    assert_eq!(c.conflicts.token_fields, 2);
+    assert_eq!(c.conflicts.identity_metadata, 0);
+    assert_eq!(c.conflicts.parser_evidence, 0);
+    assert_eq!(c.conflicts.ineligible_peer, 0);
     assert_eq!(c.eligible_observations, 0);
     assert_eq!(c.unresolved.conflicting_evidence, 2);
 }
@@ -370,5 +376,112 @@ fn replays_across_files_are_compared_only_within_the_explicit_batch() {
     assert_eq!(
         claims(batch(&[RECORD]).exact_replay_summary(1)).replay_observations,
         0
+    );
+}
+
+// ABF142: each counter counts affected observations, never pairs or physical events.
+#[test]
+fn conflict_attribution_separates_retained_evidence_and_preserves_accounting() {
+    let cases = [
+        (RECORD.replace("03:04:05Z", "03:04:06Z"), [0, 2, 0, 0]),
+        (
+            RECORD.replace("\"output_tokens\":3", "\"output_tokens\":7"),
+            [0, 0, 2, 0],
+        ),
+        (
+            RECORD.replace(
+                "\"input_tokens\":10",
+                "\"unknown_tokens\":0,\"input_tokens\":10",
+            ),
+            [1, 0, 0, 2],
+        ),
+        (
+            RECORD.replace("\"isSidechain\":false", "\"isSidechain\":true"),
+            [1, 2, 0, 0],
+        ),
+    ];
+    for (other, expected) in cases {
+        let b = batch(&[RECORD, &other]);
+        let result = b.exact_replay_summary(2);
+        assert_eq!(result.raw, b.summary());
+        let c = claims(result);
+        assert_eq!(c.unresolved.conflicting_evidence, 2);
+        assert_eq!(c.eligible_observations, 0);
+        let d = c.conflicts;
+        assert_eq!(
+            [
+                d.ineligible_peer,
+                d.identity_metadata,
+                d.token_fields,
+                d.parser_evidence
+            ],
+            expected
+        );
+        assert_eq!(d.uuid_related, 2);
+        assert_eq!(d.session_message_related, 2);
+    }
+}
+
+#[test]
+fn identical_ineligible_peers_need_no_evidence_difference_to_conflict() {
+    let sidechain = RECORD.replace("\"isSidechain\":false", "\"isSidechain\":true");
+    let c = claims(batch(&[&sidechain, &sidechain]).exact_replay_summary(2));
+    assert_eq!(
+        c.conflicts,
+        ConflictCounts {
+            ineligible_peer: 2,
+            uuid_related: 2,
+            session_message_related: 2,
+            ..ConflictCounts::default()
+        }
+    );
+}
+
+#[test]
+fn conflict_relations_are_reported_only_for_conflicting_peers() {
+    for (other, uuid_related, session_message_related) in [
+        (RECORD.replace("fictional-message", "other-message"), 2, 0),
+        (RECORD.replace("fictional-uuid-a", "other-uuid"), 0, 2),
+    ] {
+        let c = claims(batch(&[RECORD, &other]).exact_replay_summary(2));
+        assert_eq!(c.conflicts.uuid_related, uuid_related);
+        assert_eq!(c.conflicts.session_message_related, session_message_related);
+        assert_eq!(c.conflicts.identity_metadata, 2);
+    }
+    let c = claims(batch(&[RECORD, RECORD]).exact_replay_summary(2));
+    assert_eq!(c.conflicts, ConflictCounts::default());
+}
+
+#[test]
+fn overlapping_conflict_reasons_count_each_observation_once_across_peers() {
+    let other = RECORD.replace("03:04:05Z", "03:04:06Z").replace(
+        "\"output_tokens\":3",
+        "\"unknown_tokens\":0,\"output_tokens\":7",
+    );
+    let b = batch(&[RECORD, RECORD, &other]);
+    let result = b.exact_replay_summary(3);
+    assert_eq!(result.raw, b.summary());
+    assert_eq!(
+        result.raw.components.output.value,
+        ComponentValue::ReportedClaimSum(13)
+    );
+    let c = claims(result);
+    assert_eq!(
+        c.conflicts,
+        ConflictCounts {
+            ineligible_peer: 2,
+            identity_metadata: 3,
+            token_fields: 3,
+            parser_evidence: 3,
+            uuid_related: 3,
+            session_message_related: 3
+        }
+    );
+    assert_eq!(c.unresolved.conflicting_evidence, 3);
+    assert_eq!(c.representatives, 0);
+    assert_eq!(c.replay_observations, 0);
+    assert_eq!(
+        c,
+        claims(batch(&[&other, RECORD, RECORD]).exact_replay_summary(3))
     );
 }

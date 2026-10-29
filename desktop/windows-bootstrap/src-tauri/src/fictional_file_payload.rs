@@ -258,6 +258,23 @@ pub(super) fn replay_json(evaluation: &claude_replay::ReplayEvaluation) -> Strin
                     ]),
                 ),
                 (
+                    "conflicts",
+                    object(&[
+                        ("ineligiblePeer", number(claims.conflicts.ineligible_peer)),
+                        (
+                            "identityMetadata",
+                            number(claims.conflicts.identity_metadata),
+                        ),
+                        ("tokenFields", number(claims.conflicts.token_fields)),
+                        ("parserEvidence", number(claims.conflicts.parser_evidence)),
+                        ("uuidRelated", number(claims.conflicts.uuid_related)),
+                        (
+                            "sessionMessageRelated",
+                            number(claims.conflicts.session_message_related),
+                        ),
+                    ]),
+                ),
+                (
                     "components",
                     object(&[
                         ("input", component(&claims.components.input)),

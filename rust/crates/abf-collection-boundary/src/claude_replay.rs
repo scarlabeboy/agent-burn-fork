@@ -36,6 +36,63 @@ pub struct UnresolvedCounts {
     pub conflicting_evidence: u64,
 }
 
+/// ABF142: overlapping counts of observations with at least one conflicting peer.
+/// Each observation contributes at most one to each counter, regardless of peer count.
+/// Relation counts cover conflicting peers only; they are not unique pairs or events.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConflictCounts {
+    pub ineligible_peer: u64,
+    pub identity_metadata: u64,
+    pub token_fields: u64,
+    pub parser_evidence: u64,
+    pub uuid_related: u64,
+    pub session_message_related: u64,
+}
+
+// Exhaustive destructuring makes new retained fields require an attribution decision.
+// These differences explain the existing full equality decision; they never replace it.
+fn evidence_differences(a: &ClaudeObservation, b: &ClaudeObservation) -> [bool; 3] {
+    let ClaudeObservation {
+        identity,
+        correlation,
+        session_id,
+        request_id,
+        timestamp,
+        message,
+        message_id,
+        model,
+        usage,
+        input,
+        output,
+        cache_read,
+        cache_creation_flat,
+        cache_creation_detail,
+        cache_creation_5m,
+        cache_creation_1h,
+        status,
+        diagnostics,
+    } = a;
+    [
+        identity != &b.identity
+            || correlation != &b.correlation
+            || session_id != &b.session_id
+            || request_id != &b.request_id
+            || timestamp != &b.timestamp
+            || message != &b.message
+            || message_id != &b.message_id
+            || model != &b.model,
+        usage != &b.usage
+            || input != &b.input
+            || output != &b.output
+            || cache_read != &b.cache_read
+            || cache_creation_flat != &b.cache_creation_flat
+            || cache_creation_detail != &b.cache_creation_detail
+            || cache_creation_5m != &b.cache_creation_5m
+            || cache_creation_1h != &b.cache_creation_1h,
+        status != &b.status || diagnostics != &b.diagnostics,
+    ]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReplayClaims {
     pub basis: ReplayBasis,
@@ -45,6 +102,7 @@ pub struct ReplayClaims {
     pub replay_observations: u64,
     pub unresolved_observations: u64,
     pub unresolved: UnresolvedCounts,
+    pub conflicts: ConflictCounts,
     /// Sums of one retained observation per eligible group only. Unresolved claims are
     /// excluded here, remain in `raw`, and must never be interpreted as zero consumption.
     pub components: ClaudeComponents,
@@ -143,11 +201,43 @@ fn evaluate(batch: &ClaudeBatch, observations: u64, limit: usize) -> ReplayEvalu
         Accumulator::new(),
     ];
     let mut unresolved = UnresolvedCounts::default();
+    let mut conflicts = ConflictCounts::default();
     let (mut eligible_observations, mut representatives, mut replay_observations) = (0, 0, 0);
     for (index, o) in entries.iter().enumerate() {
-        let conflict = entries.iter().enumerate().any(|(peer_index, peer)| {
-            peer_index != index && related(o, peer) && (!eligible(peer) || *o != *peer)
-        });
+        let mut conflict = false;
+        let mut reasons = [false; 6];
+        for (peer_index, peer) in entries.iter().enumerate() {
+            // Preserve the ABF140B predicate exactly; scan all peers for attribution.
+            if peer_index != index && related(o, peer) && (!eligible(peer) || *o != *peer) {
+                conflict = true;
+                let [metadata, tokens, parser] = evidence_differences(o, peer);
+                let flags = [
+                    !eligible(peer),
+                    metadata,
+                    tokens,
+                    parser,
+                    same_text(&o.identity.record_uuid, &peer.identity.record_uuid),
+                    same_text(&o.session_id, &peer.session_id)
+                        && same_text(&o.message_id, &peer.message_id),
+                ];
+                for (reason, flag) in reasons.iter_mut().zip(flags) {
+                    *reason |= flag;
+                }
+            }
+        }
+        for (count, reason) in [
+            &mut conflicts.ineligible_peer,
+            &mut conflicts.identity_metadata,
+            &mut conflicts.token_fields,
+            &mut conflicts.parser_evidence,
+            &mut conflicts.uuid_related,
+            &mut conflicts.session_message_related,
+        ]
+        .into_iter()
+        .zip(reasons)
+        {
+            *count += u64::from(reason);
+        }
         unresolved.invalid_identity += u64::from(!identity_valid(o));
         unresolved.unsupported_record_type +=
             u64::from(text(&o.identity.record_type) != Some("assistant"));
@@ -178,6 +268,7 @@ fn evaluate(batch: &ClaudeBatch, observations: u64, limit: usize) -> ReplayEvalu
         replay_observations,
         unresolved_observations: observations - eligible_observations,
         unresolved,
+        conflicts,
         components: ClaudeComponents {
             input,
             output,

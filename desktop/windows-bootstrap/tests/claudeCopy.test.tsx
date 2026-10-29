@@ -202,6 +202,7 @@ test('Rust golden renders separate replay subset and unchanged raw sums', async 
   assert.match(markup, /Representatives: 1/u);
   assert.match(markup, /Exact replay copies: 1/u);
   assert.match(markup, /Unresolved observations: 0/u);
+  assert.match(markup, /Differing token fields: 0/u);
   assert.match(markup, /10 observed claims/u);
   assert.match(markup, /20 observed claims/u);
   assert.match(markup, /NOT the complete or billed usage total/u);
@@ -231,7 +232,9 @@ for (const [label, raw, unresolved, reasons] of [
 ] as const) {
   test(`${label} evaluation has unavailable subset tokens rather than zero usage`, async () => {
     const replay = { ...evaluated, eligibleObservations: 0, representatives: 0, exactReplayCopies: 0,
-      unresolvedObservations: unresolved, unresolved: reasons, components: emptyComponents };
+      unresolvedObservations: unresolved, unresolved: reasons, components: emptyComponents,
+      conflicts: { ineligiblePeer: 0, identityMetadata: 0, tokenFields: reasons.conflictingEvidence,
+        parserEvidence: 0, uuidRelated: reasons.conflictingEvidence, sessionMessageRelated: reasons.conflictingEvidence } };
     const markup = await renderResult({ ...replayFixture, raw, replay });
     assert.match(markup, /Eligible observations: 0/u);
     assert.match(markup, /Input tokens: Unavailable - no observations/u);
@@ -265,5 +268,54 @@ test('Clear discards evaluated replay and raw together and cannot reread', async
     selection: { environment: 'windows', harness: 'claude-code' },
     onSelectEnvironment: () => {}, onSelectHarness: () => {}, copyDiagnostic: reader.getSnapshot(),
   }));
-  assert.doesNotMatch(markup, /20 observed claims|Eligible observations:|Exact replay copies:/u);
+  assert.doesNotMatch(markup, /20 observed claims|Eligible observations:|Exact replay copies:|Differing token fields:|Conflict attribution/u);
+});
+
+test('conflict attribution rejects missing, private, fractional and inconsistent counters', () => {
+  for (const conflicts of [undefined, {}, { ...evaluated.conflicts, uuid: 'PRIVATE' },
+    { ...evaluated.conflicts, tokenFields: -1 }, { ...evaluated.conflicts, tokenFields: 0.5 },
+    { ...evaluated.conflicts, tokenFields: 1 }, { ...evaluated.conflicts, uuidRelated: 1025 }]) {
+    assert.equal(isClaudeCopyResult({ ...replayFixture, replay: { ...evaluated, conflicts } }), false);
+  }
+});
+
+test('overlapping conflict attribution renders counts and Clear removes them', async () => {
+  const result = { ...replayFixture, replay: { ...evaluated, eligibleObservations: 0,
+    representatives: 0, exactReplayCopies: 0, unresolvedObservations: 2,
+    unresolved: { ...evaluated.unresolved, conflictingEvidence: 2 }, components: emptyComponents,
+    conflicts: { ineligiblePeer: 1, identityMetadata: 2, tokenFields: 2, parserEvidence: 2,
+      uuidRelated: 2, sessionMessageRelated: 2 } } };
+  const markup = await renderResult(result);
+  for (const label of ['Related ineligible peer: 1', 'Differing identity or metadata: 2',
+    'Differing token fields: 2', 'Differing parser evidence: 2', 'UUID-related conflict: 2',
+    'Session/message-related conflict: 2']) assert.ok(markup.includes(label));
+  assert.match(markup, /Each counter counts an observation once/u);
+  assert.match(markup, /20 observed claims/u);
+  for (const conflicts of [
+    { ...result.replay.conflicts, uuidRelated: 0, sessionMessageRelated: 0 },
+    { ...result.replay.conflicts, ineligiblePeer: 0, identityMetadata: 0, tokenFields: 0, parserEvidence: 0 },
+    { ...result.replay.conflicts, tokenFields: 3 },
+  ]) assert.equal(isClaudeCopyResult({ ...result, replay: { ...result.replay, conflicts } }), false);
+  let calls = 0;
+  const reader = createClaudeCopyDiagnostic(async () => { calls++; return JSON.stringify(result); });
+  await reader.run('copy.jsonl');
+  reader.clear();
+  await reader.run('copy.jsonl');
+  assert.deepEqual(reader.getSnapshot(), { status: 'cleared', attempted: true });
+  assert.equal(calls, 1);
+});
+
+test('Rust overlap golden crosses strict validation and renders attribution with raw totals', async () => {
+  const result: unknown = JSON.parse(readFileSync(new URL('../fixtures/abf142-conflicts-payload.json', import.meta.url), 'utf8'));
+  assert.ok(isClaudeCopyResult(result));
+  const markup = await renderResult(result);
+  assert.match(markup, /Related ineligible peer: 2/u);
+  assert.match(markup, /Differing identity or metadata: 3/u);
+  assert.match(markup, /Differing token fields: 3/u);
+  assert.match(markup, /Differing parser evidence: 3/u);
+  assert.match(markup, /UUID-related conflict: 3/u);
+  assert.match(markup, /Session\/message-related conflict: 3/u);
+  assert.match(markup, /30 observed claims/u);
+  assert.match(markup, /13 observed claims/u);
+  assert.doesNotMatch(markup, /PRIVATE|fictional-time|fictional-model|unknown_tokens/u);
 });

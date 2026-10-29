@@ -6,6 +6,8 @@ export type ClaudeCopyReplay =
     eligibleObservations: number; representatives: number; exactReplayCopies: number; unresolvedObservations: number;
     unresolved: Readonly<{ invalidIdentity: number; unsupportedRecordType: number; sidechain: number;
       invalidClaims: number; conflictingEvidence: number }>;
+    conflicts: Readonly<{ ineligiblePeer: number; identityMetadata: number; tokenFields: number;
+      parserEvidence: number; uuidRelated: number; sessionMessageRelated: number }>;
     components: Readonly<Record<ComponentId, ComponentSummary>> }>
   | Readonly<{ status: 'identity-budget-exhausted'; observations: number; limit: number }>
   | Readonly<{ status: 'invalid-identity-limit' | 'wrong-harness' | 'allocation-failure' }>;
@@ -30,7 +32,7 @@ export function isClaudeCopyReplay(value: unknown, raw: ClaudeClaimSummary): val
         && value.observations === raw.records.observations && value.observations > value.limit;
     case 'evaluated': {
       if (!keys(value, ['status', 'basis', 'eligibleObservations', 'representatives', 'exactReplayCopies',
-        'unresolvedObservations', 'unresolved', 'components'])
+        'unresolvedObservations', 'unresolved', 'conflicts', 'components'])
         || value.basis !== 'source-scoped-exact-observation-claims-v1'
         || !count(value.eligibleObservations) || !count(value.representatives)
         || !count(value.exactReplayCopies) || !count(value.unresolvedObservations)
@@ -44,6 +46,14 @@ export function isClaudeCopyReplay(value: unknown, raw: ClaudeClaimSummary): val
       if (!record(reasons) || !keys(reasons, names)
         || !names.every((name) => count(reasons[name]) && reasons[name] <= unresolvedObservations)
         || names.reduce((sum, name) => sum + Number(reasons[name]), 0) < value.unresolvedObservations) return false;
+      const conflicts = value.conflicts;
+      const causes = ['ineligiblePeer', 'identityMetadata', 'tokenFields', 'parserEvidence'] as const;
+      const relations = ['uuidRelated', 'sessionMessageRelated'] as const;
+      const conflictCount = Number(reasons.conflictingEvidence);
+      if (!record(conflicts) || !keys(conflicts, [...causes, ...relations])
+        || ![...causes, ...relations].every((name) => count(conflicts[name]) && conflicts[name] <= conflictCount)
+        || causes.reduce((sum, name) => sum + Number(conflicts[name]), 0) < conflictCount
+        || relations.reduce((sum, name) => sum + Number(conflicts[name]), 0) < conflictCount) return false;
       const components = value.components;
       const ids = ['input', 'output', 'cacheCreation', 'cacheRead'] as const;
       return record(components) && keys(components, ids) && ids.every((id) => {

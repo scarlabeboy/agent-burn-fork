@@ -70,6 +70,52 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_attribution_matches_sanitized_frontend_golden() {
+        let tree = Tree::new();
+        fs::write(
+            tree.0.join("copy.jsonl"),
+            include_bytes!("../fixtures/abf142-conflicts.jsonl"),
+        )
+        .unwrap();
+        let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+            .run("copy.jsonl")
+            .unwrap();
+        assert_eq!(
+            result,
+            include_str!("../fixtures/abf142-conflicts-payload.json").trim()
+        );
+        assert!(result.len() <= 16384);
+        for private in [
+            "PRIVATE",
+            "fictional-time",
+            "fictional-other-time",
+            "fictional-model",
+            "copy.jsonl",
+            "unknown_tokens",
+        ] {
+            assert!(!result.contains(private));
+        }
+    }
+
+    #[test]
+    fn attribution_at_record_ceiling_stays_within_transport_cap() {
+        let tree = Tree::new();
+        let records = include_str!("../fixtures/abf142-conflicts.jsonl");
+        let changed = records.lines().last().unwrap();
+        fs::write(
+            tree.0.join("copy.jsonl"),
+            format!("{changed}\n").repeat(1024),
+        )
+        .unwrap();
+        let result = CopyReader::synthetic_test_root(Some(tree.0.clone()))
+            .run("copy.jsonl")
+            .unwrap();
+        assert!(result.len() <= 16384);
+        assert!(result.contains(r#""conflictingEvidence":1024"#));
+        assert!(result.contains(r#""conflicts":{"ineligiblePeer":1024,"identityMetadata":0,"tokenFields":0,"parserEvidence":0,"uuidRelated":1024,"sessionMessageRelated":1024}"#));
+    }
+
+    #[test]
     fn conflicting_copy_evidence_keeps_raw_and_no_subset_sum() {
         let tree = Tree::new();
         let records = include_str!("../fixtures/abf141-replay.jsonl");
@@ -86,6 +132,8 @@ mod tests {
         assert!(result.contains("\"amount\":\"32\""));
         assert!(result.contains("\"eligibleObservations\":0,\"representatives\":0,\"exactReplayCopies\":0,\"unresolvedObservations\":3"));
         assert!(result.contains("\"conflictingEvidence\":3"));
+        assert!(result.contains(r#""conflicts":{"ineligiblePeer":0,"identityMetadata":0,"tokenFields":3,"parserEvidence":0,"uuidRelated":3,"sessionMessageRelated":3}"#));
+        assert!(result.len() <= 16384);
         let replay = result.split_once(",\"replay\":").unwrap().1;
         assert!(replay.contains("no-observations"));
         assert!(!replay.contains("\"amount\":"));

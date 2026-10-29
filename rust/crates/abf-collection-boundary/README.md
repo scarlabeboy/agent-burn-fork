@@ -433,3 +433,39 @@ sidechain observations informed candidate-conflict detection. Their parent,
 larger-token-total, speed and cost replacement preferences are not adopted.
 ABF reuses its existing parsers and summary accumulators. No upstream adapter,
 pricing, quota, persistence, discovery, Windows or WSL integration is added.
+
+### Bounded conflict attribution (ABF142)
+
+Evaluated claims also carry `conflicts: ConflictCounts`. Each counter counts an
+observation once if at least one **conflicting** peer satisfies its condition.
+The ABF140B `related && (!eligible(peer) || observation != peer)` decision remains
+authoritative, excluding self-comparisons. Attribution does not classify a
+second set of conflicts or change eligibility, representatives, replay copies,
+unresolved counts, raw summaries or token accounting.
+
+- `ineligible_peer`: at least one conflicting peer fails the existing eligibility
+  checks. This is directional: an ineligible observation with only eligible peers
+  does not itself contribute here. Identical related ineligible peers can conflict
+  without any retained-field difference.
+- `identity_metadata`: retained identity object (type, UUID, sidechain), caller
+  correlation, session, request, timestamp, message container state, message ID or
+  model differs, including field states.
+- `token_fields`: usage container state, input, output, cache-read, flat cache
+  creation, cache-creation container state or either cache-breakdown child differs,
+  including field states. Comparison retains flat/breakdown evidence even when
+  resolved token totals match or a flat claim is ignored for summation.
+- `parser_evidence`: parser status or diagnostic bits differ. For example, an
+  unknown token key can change parser evidence without changing retained token
+  fields. This is not proof of a provider lifecycle or a specific invalid field.
+- `uuid_related`: at least one conflicting peer has the same valid bounded UUID.
+- `session_message_related`: at least one conflicting peer has the same valid
+  bounded session/message pair.
+
+Causes and relations overlap within and across peers. Each counter is at most
+`unresolved.conflicting_evidence`; the first four together cover that count,
+and the last two together cover it. Their sums are not observation, unique-pair,
+physical-event or group counts. Zero counters do not certify complete coverage.
+No per-record attribution or retained values are exported. All peers are visited
+instead of stopping at the first conflict; time remains bounded O(n^2), with six
+boolean flags per observation being evaluated and six aggregate integer counters,
+no additional heap allocation and unchanged collection/identity budgets.
