@@ -7,6 +7,7 @@ import { createClaudeCopyDiagnostic, isClaudeCopySummary, isClaudeCopyResult } f
 import type { ClaudeCopySummary, CopyDiagnosticState } from '../frontend/src/claudeCopyDiagnostic.ts';
 import type { ComponentSummary } from '../frontend/src/fictionalClaudeBridge.ts';
 import { ShellView } from '../frontend/src/App.tsx';
+import { snapshot } from './syntheticFixture.ts';
 const fixture: unknown = JSON.parse(readFileSync(new URL('../fixtures/abf136-expected-payload.json', import.meta.url), 'utf8'));
 const rawGolden = readFileSync(new URL('../fixtures/abf137-expected-payload.json', import.meta.url), 'utf8').trim();
 const golden = JSON.stringify({ schemaVersion: 1, raw: JSON.parse(rawGolden), replay: { status: 'allocation-failure' } });
@@ -329,6 +330,8 @@ test('file failures and record exhaustion are not presented as successful no-usa
   assert.match(panel, /File was not read successfully/u);
   assert.match(panel, /Record budget exhaustion discards all claims from the file/u);
   assert.doesNotMatch(panel, /File read succeeded/u);
+  assert.doesNotMatch(renderCopyState({ status: 'copy', attempted: true, summary: failed,
+    replay: { status: 'allocation-failure' } }), /synthetic-demonstration/u);
 });
 
 test('copy envelope shows replay unavailable while preserving raw totals', async () => {
@@ -359,6 +362,65 @@ const emptyComponents = { input: noObservations, output: noObservations, cacheCr
 function visibleCopy(summary: ClaudeCopySummary): string {
   return copyPanel(summary).split('<details class="scenario copy-details"')[0] ?? '';
 }
+test('successful copy keeps snapshot and unavailable quota visible before collapsed synthetic demonstration', async () => {
+  const html = await renderResult(replayFixture);
+  const disclosure = html.indexOf('<details class="scenario synthetic-demonstration">');
+  assert.ok(disclosure > html.indexOf('Manual copy session snapshot'));
+  assert.ok(disclosure > html.indexOf('id="quota-section-title"'));
+  assert.match(html.slice(disclosure), /^<details class="scenario synthetic-demonstration"><summary>Synthetic demonstration - expand to view fictional dashboards and examples<\/summary>/u);
+  assert.ok(disclosure < html.indexOf('aria-label="Overview metrics"'));
+  assert.ok(disclosure < html.indexOf('id="fictional-results-title"'));
+  assert.ok(disclosure < html.indexOf('id="activity-title"'));
+  assert.ok(disclosure < html.indexOf('id="models-title"'));
+  assert.match(html.slice(disclosure), /<\/div><\/details><\/div><\/main>/u);
+  assert.doesNotMatch(html.slice(disclosure), /Manual copy session snapshot|quota-section-title/u);
+});
+for (const state of [
+  { status: 'idle', attempted: false }, { status: 'cancelled', attempted: false },
+  { status: 'selecting', attempted: true }, { status: 'running', attempted: true },
+  { status: 'unavailable', attempted: true, code: 'COPY_READ_FAILED' },
+  { status: 'cleared', attempted: true },
+] as const satisfies readonly CopyDiagnosticState[]) {
+  test(`${state.status} retains the no-result dashboard presentation`, () => {
+    const html = renderCopyState(state);
+    assert.doesNotMatch(html, /synthetic-demonstration/u);
+    assert.match(html, /aria-label="Overview metrics"/u);
+    assert.match(html, /id="fictional-results-title"/u);
+    assert.match(html, /id="quota-section-title"/u);
+  });
+}
+test('successful copy does not collapse demos in other environments or harnesses', () => {
+  for (const environment of ['windows', 'selected-wsl', 'computer'] as const) {
+    for (const harness of ['general', 'claude-code', 'codex', 'opencode'] as const) {
+      const props = { selection: { environment, harness }, onSelectEnvironment: () => {}, onSelectHarness: () => {} };
+      const baseline = renderToStaticMarkup(createElement(ShellView, {
+        ...props, copyDiagnostic: { status: 'idle', attempted: false },
+      }));
+      const html = renderToStaticMarkup(createElement(ShellView, {
+        ...props, copyDiagnostic: { status: 'copy', attempted: true, summary: copy, replay: evaluated },
+      }));
+      assert.equal(html.includes('synthetic-demonstration'), environment === 'windows' && harness === 'claude-code');
+      // Other views retain their entire no-result presentation.
+      assert.equal(environment === 'windows' && harness === 'claude-code' || html === baseline, true);
+    }
+  }
+});
+test('copy claims leave populated synthetic metrics and breakdowns unchanged', () => {
+  for (const environment of ['windows', 'selected-wsl', 'computer'] as const) {
+    const render = (copyDiagnostic: CopyDiagnosticState) => renderToStaticMarkup(createElement(ShellView, {
+      selection: { environment, harness: 'claude-code' }, onSelectEnvironment: () => {}, onSelectHarness: () => {},
+      bridgeState: { status: 'synthetic', snapshot }, copyDiagnostic,
+    }));
+    const baseline = render({ status: 'idle', attempted: false });
+    const html = render({ status: 'copy', attempted: true, summary: copy, replay: evaluated });
+    const metrics = (value: string) => value.match(/<section class="metrics".*?<\/section>/u)?.[0];
+    const breakdowns = (value: string) => value.match(/<div class="grid">.*?<\/table><\/section><\/div>/u)?.[0];
+    assert.ok(metrics(baseline));
+    assert.ok(breakdowns(baseline));
+    assert.equal(metrics(html), metrics(baseline));
+    assert.equal(breakdowns(html), breakdowns(baseline));
+  }
+});
 test('manual reader precedes synthetic metrics and fictional scenarios', async () => {
   const html = await renderResult(replayFixture);
   assert.ok(html.indexOf('id="claude-copy-title"') < html.indexOf('aria-label="Overview metrics"'));
@@ -439,7 +501,10 @@ test('selection changes hide and restore the snapshot; Clear removes snapshot an
   assert.equal(render('windows', 'claude-code'), before);
   assert.equal(calls, 1);
   reader.clear();
-  assert.doesNotMatch(render('windows', 'claude-code'), /Manual copy session snapshot|Token, parser and replay diagnostics|data-component=/u);
+  const cleared = render('windows', 'claude-code');
+  assert.doesNotMatch(cleared, /Manual copy session snapshot|Token, parser and replay diagnostics|data-component=|synthetic-demonstration/u);
+  assert.match(cleared, /aria-label="Overview metrics"/u);
+  assert.deepEqual(reader.getSnapshot(), { status: 'cleared', attempted: true });
 });
 async function renderResult(result: unknown): Promise<string> {
   const reader = createClaudeCopyDiagnostic(async () => JSON.stringify(result));

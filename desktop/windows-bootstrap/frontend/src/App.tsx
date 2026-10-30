@@ -358,6 +358,15 @@ function QuotaPanel({ panel }: Readonly<{ panel: QuotaPanelDefinition }>): React
   );
 }
 
+function SyntheticDemonstration({ collapsed, children }: Readonly<{
+  collapsed: boolean; children: React.ReactNode;
+}>): React.JSX.Element {
+  return collapsed ? <details className="scenario synthetic-demonstration">
+    <summary>Synthetic demonstration - expand to view fictional dashboards and examples</summary>
+    <div className="synthetic-demonstration__content">{children}</div>
+  </details> : <>{children}</>;
+}
+
 export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bridgeState = { status: 'loading' }, fictionalClaude, fileDiagnostic, onRunFileDiagnostic, onClearFileDiagnostic, copyDiagnostic, onRunCopyDiagnostic, onChooseCopyDiagnostic, onClearCopyDiagnostic }: ShellViewProps): React.JSX.Element {
   const environment = environmentOf(selection);
   const harness = harnessOf(selection);
@@ -367,6 +376,17 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
     environment.id, harness.id);
   const values = [summary?.tokens, undefined, summary?.sessions, summary?.models.length];
   const sourceNames = summary?.sources.map((source) => environments.find((entry) => entry.id === source)?.label).join(' + ');
+  const focusCopy = environment.id === 'windows' && harness.id === 'claude-code'
+    && copyDiagnostic?.status === 'copy' && copyDiagnostic.summary.files.read > 0;
+  const quotas = isGeneral ? null : (
+    <section className="quotas" aria-labelledby="quota-section-title">
+      <h2 className="section-title" id="quota-section-title">{harness.label} quota and status</h2>
+      <p className="section-note">{shellText.quotaScope}</p>
+      <div className="quotas__grid">
+        {harness.quotaPanels.map((panel) => <QuotaPanel key={panel.id} panel={panel} />)}
+      </div>
+    </section>
+  );
 
   return (
     <div className="app" data-environment={environment.id} data-harness={harness.id}>
@@ -421,6 +441,8 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
           <p className="page-note">{copyDiagnostic === undefined ? shellText.explanation : 'Dashboard is synthetic; manual copy reader is separate. No account, quota or spending is observed.'}</p>
           {copyDiagnostic !== undefined && environment.id === 'windows' && harness.id === 'claude-code'
             ? <ClaudeCopyPanel state={copyDiagnostic} onRun={onRunCopyDiagnostic} onChoose={onChooseCopyDiagnostic} onClear={onClearCopyDiagnostic} /> : null}
+          {focusCopy ? quotas : null}
+          <SyntheticDemonstration collapsed={focusCopy}>
           {copyDiagnostic !== undefined ? <h2 className="section-title">Synthetic dashboard - demonstration only</h2> : null}
           <p className="page-note" role="status">
             {bridgeState.status === 'synthetic'
@@ -483,15 +505,7 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
           {fictionalClaude !== undefined && environment.id === 'selected-wsl' && harness.id === 'claude-code'
             ? <FictionalClaudePanel state={fictionalClaude} /> : null}
 
-          {isGeneral ? null : (
-            <section className="quotas" aria-labelledby="quota-section-title">
-              <h2 className="section-title" id="quota-section-title">{harness.label} quota and status</h2>
-              <p className="section-note">{shellText.quotaScope}</p>
-              <div className="quotas__grid">
-                {harness.quotaPanels.map((panel) => <QuotaPanel key={panel.id} panel={panel} />)}
-              </div>
-            </section>
-          )}
+          {focusCopy ? null : quotas}
 
           <div className="grid">
             <Region id="activity" title={isGeneral ? 'Synthetic activity' : `${harness.label} synthetic activity`}>
@@ -557,6 +571,7 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
               </table>
             </Region>
           </div>
+          </SyntheticDemonstration>
         </div>
       </main>
 

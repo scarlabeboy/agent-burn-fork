@@ -16,6 +16,18 @@ the one attempt shared with **Configured copy root (optional legacy flow)**.
 The existing snapshot appears after a validated result. **Clear copy result**
 removes it without rearming a consumed attempt. Restart for another read.
 
+ABF147 focuses **Windows / Claude Code** on the selected-copy result after a
+successful file read. **Synthetic demonstration - expand to view fictional
+dashboards and examples** is a native disclosure, initially collapsed. Expanding
+it reveals the existing synthetic metrics, scenarios, activity and models.
+Quota-unavailable information stays visible outside the disclosure. Copy claims
+never enter demo metrics or environment/Computer totals. Clear restores the
+no-result dashboard presentation without enabling another read. Cancellation,
+failed reads and all other environment/harness views retain their presentation.
+Returning to the successful copy view starts the demonstration collapsed again;
+navigation does not reread the copy. The snapshot and detailed diagnostics remain
+available independently of the demonstration.
+
 This workspace has its own pnpm workspace and locks and a standalone Rust
 workspace. It does not import the production CLI or macOS application. The fictional Claude
 panels use the isolated collection boundary and parser research crates. React is bundled into local static assets; the future
