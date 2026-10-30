@@ -275,6 +275,8 @@ pub struct FileReport {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SkipReason {
+    /// Ignored immediate entry; its type and contents were not investigated.
+    UnselectedEntry,
     Symlink,
     NotRegularFile,
     NonUtf8Name,
@@ -300,6 +302,16 @@ pub struct SkippedEntry {
     /// `None` when the name is not valid UTF-8 or not an acceptable name.
     pub relative_path: Option<String>,
     pub reason: SkipReason,
+}
+
+impl SkippedEntry {
+    /// Name-free coverage caveat for an entry excluded by explicit selection policy.
+    pub fn unselected() -> Self {
+        Self {
+            relative_path: None,
+            reason: SkipReason::UnselectedEntry,
+        }
+    }
 }
 
 /// Traversal and read completeness of a batch, not usage completeness.

@@ -504,3 +504,29 @@ No accounting changes: raw sums, exact-replay eligibility and subset components,
 conflict counts and coverage remain authoritative and unchanged. No observations
 are discarded. The diagnostic allocates no additional collection, parses no
 records again, and retains existing batch, comparison and parser budgets.
+
+### Explicit prepared Claude batches (ABF148B)
+
+`prepare_claude_jsonl_files` takes an existing scope and 1..=16 explicit immediate
+ASCII `.jsonl` names, refuses case-folded duplicates and unsafe files, sorts by
+name, and preflights all sizes against the scope and shared byte budget. It does
+not enumerate or read content. The opaque `PendingClaudeBatch` retains selection
+metadata in memory. Its consuming `collect` method revalidates the complete
+selection around reads and returns one `ClaudeBatch`, or an error discarding every
+file report. Workers, parser, line caveats, provenance positions and batch-wide
+record budget are shared with the existing APIs. Replay evaluation spans files.
+This does not alter existing root/single-file behavior or counting semantics.
+
+The Windows bootstrap separately owns native folder selection, locality checks,
+enumeration and one-shot lifecycle; this API grants no discovery authority. See
+its README for the 16-file/24-MiB/4,096-outcome import contract and residual
+path-based limitations. Synthetic tests do not validate native Windows behavior.
+
+ABF148D revises only the bootstrap's folder byte safeguards to 3 MiB/file and
+24 MiB aggregate. The scope's 256 MiB/file and reader's 1 GiB/batch hard ceilings
+already permit these values; no ceiling or single-file behavior changes.
+`SkippedEntry::unselected()` records a name-free ignored entry conservatively as
+possibly hiding data. The bootstrap attaches those bounded enumeration caveats
+to its one batch and marks folder coverage incomplete. The prepared-file API
+itself still reports only its explicit file list; it does not enumerate ignored
+entries or claim complete source usage.

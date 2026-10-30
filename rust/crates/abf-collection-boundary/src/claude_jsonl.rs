@@ -101,6 +101,8 @@ pub enum ClaudeCollectError {
     Boundary(CollectError),
     /// More candidate files than [`ClaudeReadLimits::max_files`].
     FileLimitExceeded,
+    /// Explicit batch admission or read failed; no partial result is returned.
+    BatchRejected,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -382,6 +384,112 @@ pub fn collect_claude_jsonl_file(
         skipped: Vec::new(),
         completeness,
     })
+}
+
+/// Metadata-only explicit batch admission. Paths remain private; no enumeration occurs.
+/// Batches contain 1..=16 immediate files, sorted by ASCII name. Every file must
+/// preflight successfully before any content read. Case-folded duplicates are refused.
+pub fn prepare_claude_jsonl_files(
+    scope: &CollectionScope,
+    names: &[&str],
+    limits: ClaudeReadLimits,
+) -> Result<PendingClaudeBatch, ClaudeCollectError> {
+    let reject = ClaudeCollectError::BatchRejected;
+    if !limits.is_valid() {
+        return Err(ClaudeCollectError::InvalidLimits);
+    }
+    if scope.source().harness() != Harness::ClaudeCode {
+        return Err(ClaudeCollectError::WrongHarness);
+    }
+    if names.is_empty() || names.len() > limits.max_files.min(16) {
+        return Err(reject);
+    }
+    let mut names = names.to_vec();
+    names.sort_unstable();
+    let mut folded = std::collections::BTreeSet::new();
+    let mut files = Vec::with_capacity(names.len());
+    let mut bytes = 0u64;
+    for name in names {
+        if !name.is_ascii()
+            || name.contains(['/', '\\'])
+            || !folded.insert(name.to_ascii_lowercase())
+        {
+            return Err(reject);
+        }
+        let file = scope
+            .resolve_regular_file_with(name, CLAUDE_EXTENSION)
+            .map_err(|_| reject)?;
+        bytes = bytes.checked_add(file.len).ok_or(reject)?;
+        if file.len > scope.limits().max_file_bytes || bytes > limits.max_total_bytes {
+            return Err(reject);
+        }
+        files.push(file);
+    }
+    scope.root().revalidate().map_err(|_| reject)?;
+    Ok(PendingClaudeBatch {
+        scope: scope.clone(),
+        files,
+        limits,
+    })
+}
+
+/// Trusted in-memory selection, intentionally neither serializable nor publicly inspectable.
+pub struct PendingClaudeBatch {
+    scope: CollectionScope,
+    files: Vec<ResolvedFile>,
+    limits: ClaudeReadLimits,
+}
+impl PendingClaudeBatch {
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+    fn revalidate(&self) -> Result<(), ClaudeCollectError> {
+        let reject = ClaudeCollectError::BatchRejected;
+        self.scope.root().revalidate().map_err(|_| reject)?;
+        for old in &self.files {
+            let now = self
+                .scope
+                .resolve_regular_file_with(&old.relative, CLAUDE_EXTENSION)
+                .map_err(|_| reject)?;
+            if old.object != now.object || old.len != now.len || old.modified != now.modified {
+                return Err(reject);
+            }
+        }
+        Ok(())
+    }
+    /// Revalidates the entire selection before and after reading. Any file failure
+    /// discards all reports. Line coverage caveats remain explicit on successful reads.
+    pub fn collect(self, run: &ScanRun) -> Result<ClaudeBatch, ClaudeCollectError> {
+        self.revalidate()?;
+        let mut bytes = self.limits.max_total_bytes;
+        let mut records = self.limits.max_records;
+        let mut files = Vec::with_capacity(self.files.len());
+        for (index, selected) in self.files.iter().enumerate() {
+            self.revalidate()?;
+            let report = collect_file_report(
+                &self.scope,
+                &selected.relative,
+                index as u32,
+                &self.limits,
+                &mut bytes,
+                &mut records,
+            );
+            if report.status != ClaudeFileStatus::Read {
+                return Err(ClaudeCollectError::BatchRejected);
+            }
+            files.push(report);
+        }
+        self.revalidate()?;
+        Ok(ClaudeBatch {
+            scan_run: run.clone(),
+            environment: self.scope.environment().clone(),
+            source: self.scope.source().clone(),
+            host_match: self.scope.host_match(),
+            files,
+            skipped: Vec::new(),
+            completeness: Completeness::Complete,
+        })
+    }
 }
 
 fn collect_file_report(

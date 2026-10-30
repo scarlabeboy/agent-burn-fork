@@ -312,7 +312,7 @@ test('renders deterministically without runtime inputs', () => {
   }
 });
 
-test('frontend allows only the reviewed core invoke and five reviewed commands, with no network, timers or storage', () => {
+test('frontend allows only the reviewed core invoke and eight reviewed commands, with no network, timers or storage', () => {
   const root = fileURLToPath(new URL('../frontend/src/', import.meta.url));
   const files = (directory: string): string[] =>
     readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
@@ -330,7 +330,10 @@ test('frontend allows only the reviewed core invoke and five reviewed commands, 
       'fictionalClaudeBridge.ts': ["invoke<unknown>('abf_get_fictional_claude_summary')"],
       'fictionalFileDiagnostic.ts': ["invoke<unknown>('abf_read_fictional_claude_file_once')"],
       'claudeCopyDiagnostic.ts': ["invoke<unknown>('abf_read_claude_copy_once', { relativePath })",
-        "invoke<unknown>('abf_choose_claude_jsonl_once')"],
+        "invoke<unknown>('abf_choose_claude_jsonl_once')",
+        "invoke<unknown>('abf_choose_claude_folder_once')",
+        "invoke<unknown>('abf_analyze_claude_folder_once')",
+        "invoke<unknown>('abf_clear_claude_folder')"],
     };
     const calls = Object.entries(reviewed).find(([name]) => file === join(root, name))?.[1];
     if (calls !== undefined) {
@@ -439,7 +442,7 @@ test('official core invoke sends only the approved command with no frontend argu
   }
 });
 
-test('native boundary registers exactly five reviewed commands and enables only official IPC CSP endpoints', () => {
+test('native boundary registers exactly eight reviewed commands and enables only official IPC CSP endpoints', () => {
   const nativeRoot = new URL('../src-tauri/', import.meta.url);
   const main = readFileSync(new URL('src/main.rs', nativeRoot), 'utf8');
   const command = readFileSync(new URL('src/synthetic_snapshot.rs', nativeRoot), 'utf8');
@@ -447,10 +450,13 @@ test('native boundary registers exactly five reviewed commands and enables only 
   const config = JSON.parse(readFileSync(new URL('tauri.conf.json', nativeRoot), 'utf8'));
   const handlers = [...main.matchAll(/\.invoke_handler\(tauri::generate_handler!\[([^\]]*)\]\)/gu)];
   assert.deepEqual(handlers.map((match) => match[1]?.replace(/\s+/gu, ' ').trim()), [
-    'synthetic_snapshot::abf_get_synthetic_snapshot, fictional_claude_summary::abf_get_fictional_claude_summary, abf_read_fictional_claude_file_once, abf_read_claude_copy_once, abf_choose_claude_jsonl_once',
+    'synthetic_snapshot::abf_get_synthetic_snapshot, fictional_claude_summary::abf_get_fictional_claude_summary, abf_read_fictional_claude_file_once, abf_read_claude_copy_once, abf_choose_claude_jsonl_once, abf_choose_claude_folder_once, abf_analyze_claude_folder_once, abf_clear_claude_folder',
   ]);
   assert.match(main, /async fn abf_choose_claude_jsonl_once\(\s*window: tauri::WebviewWindow,\s*state: tauri::State<'_, std::sync::Arc<claude_copy_read::CopyReader>>,\s*\) -> Result<Option<String>, &'static str>/u,
     'picker IPC has only injected native window/state, with no frontend path parameter (static check)');
+  assert.match(main, /async fn abf_choose_claude_folder_once\(\s*window: tauri::WebviewWindow,\s*state: tauri::State<'_, std::sync::Arc<claude_copy_read::CopyReader>>,\s*\) -> Result<Option<usize>, &'static str>/u);
+  assert.match(main, /async fn abf_analyze_claude_folder_once\(\s*state: tauri::State<'_, std::sync::Arc<claude_copy_read::CopyReader>>,\s*\) -> Result<String, &'static str>/u);
+  assert.match(main, /fn abf_clear_claude_folder\(\s*state: tauri::State<'_, std::sync::Arc<claude_copy_read::CopyReader>>,?\s*\)/u);
   const claude = readFileSync(new URL('src/fictional_claude_summary.rs', nativeRoot), 'utf8');
   assert.equal([...claude.matchAll(/#\[tauri::command\]/gu)].length, 1);
   assert.match(claude, /fn abf_get_fictional_claude_summary\(\) -> String/u);

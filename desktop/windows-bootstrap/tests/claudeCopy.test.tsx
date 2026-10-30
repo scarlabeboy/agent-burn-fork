@@ -665,3 +665,139 @@ test('unconfirmed candidate fixture validates, renders only counts and clears', 
   reader.clear();
   assert.doesNotMatch(render(), /Matching-request candidates/u);
 });
+
+test('folder selection exposes only a pending count until separate analysis', async () => {
+  let reads = 0;
+  const folderPayload = readFileSync(new URL('../fixtures/abf148b-folder-payload.json', import.meta.url), 'utf8');
+  const reader = createClaudeCopyDiagnostic(undefined, undefined, async () => 2, async () => { reads++; return folderPayload; }, async () => {});
+  await reader.chooseFolder();
+  assert.deepEqual(reader.getSnapshot(), { status: 'pending', attempted: true, count: 2 });
+  assert.equal(reads, 0);
+  assert.match(renderCopyState(reader.getSnapshot()), /Analyze selected folder once/u);
+  await reader.analyzeFolder();
+  assert.equal(reads, 1);
+  assert.equal(reader.getSnapshot().status, 'copy');
+  reader.clear();
+  assert.equal(reader.getSnapshot().status, 'cleared');
+  await reader.analyzeFolder();
+  assert.equal(reads, 1);
+});
+
+for (const response of [0, 17, 1.5, 'PRIVATE/path.jsonl', { count: 2, path: 'PRIVATE' }]) {
+  test('folder selection rejects malformed counts without exposing payload', async () => {
+    const reader = createClaudeCopyDiagnostic(undefined, undefined, async () => response, undefined, async () => {});
+    await reader.chooseFolder();
+    assert.equal(reader.getSnapshot().status, 'unavailable');
+    assert.doesNotMatch(renderCopyState(reader.getSnapshot()), /PRIVATE/u);
+  });
+}
+
+test('folder cancel preserves attempt; clear suppresses late pending and analyze results', async () => {
+  const cancelled = createClaudeCopyDiagnostic(undefined, undefined, async () => null, undefined, async () => {});
+  await cancelled.chooseFolder();
+  assert.deepEqual(cancelled.getSnapshot(), { status: 'cancelled', attempted: false });
+  let resolve: (value: unknown) => void = () => {};
+  const reader = createClaudeCopyDiagnostic(undefined, undefined, () => new Promise((done) => { resolve = done; }), undefined, async () => {});
+  const selection = reader.chooseFolder();
+  await reader.choose();
+  reader.clear();
+  resolve(2);
+  await selection;
+  assert.equal(reader.getSnapshot().status, 'cleared');
+  const folderPayload = readFileSync(new URL('../fixtures/abf148b-folder-payload.json', import.meta.url), 'utf8');
+  const analyzing = createClaudeCopyDiagnostic(undefined, undefined, async () => 2, () => new Promise((done) => { resolve = done; }), async () => {});
+  await analyzing.chooseFolder();
+  const analysis = analyzing.analyzeFolder();
+  analyzing.clear();
+  resolve(folderPayload);
+  await analysis;
+  assert.equal(analyzing.getSnapshot().status, 'cleared');
+});
+
+for (const code of ['COPY_FOLDER_REFUSED', 'COPY_FOLDER_LIMIT', 'COPY_READ_FAILED', 'PRIVATE OS detail']) {
+  test(`folder refusal uses sanitized fixed guidance: ${code === 'PRIVATE OS detail' ? 'unknown' : code}`, async () => {
+    const reader = createClaudeCopyDiagnostic(undefined, undefined, async () => { throw code; }, undefined, async () => {});
+    await reader.chooseFolder();
+    assert.equal(reader.getSnapshot().status, 'unavailable');
+    assert.doesNotMatch(renderCopyState(reader.getSnapshot()), /PRIVATE/u);
+    await reader.choose();
+    assert.equal(reader.getSnapshot().status, 'unavailable');
+  });
+}
+
+test('folder aggregate results remain separate from synthetic environment and Computer totals', async () => {
+  const payload = readFileSync(new URL('../fixtures/abf148b-folder-payload.json', import.meta.url), 'utf8');
+  const reader = createClaudeCopyDiagnostic(undefined, undefined, async () => 2, async () => payload, async () => {});
+  await reader.chooseFolder();
+  await reader.analyzeFolder();
+  const markup = renderCopyState(reader.getSnapshot());
+  assert.match(markup, /Selected folder batch: 2 files/u);
+  assert.match(markup, /Synthetic dashboard - demonstration only/u);
+  assert.match(markup, /Replay checks span the whole batch/u);
+  assert.doesNotMatch(markup, /PRIVATE|\.jsonl<|selected-windows-folder/u);
+});
+
+test('folder result schema admits 4096 aggregate observations while legacy stays at 1024', () => {
+  const result: unknown = JSON.parse(readFileSync(new URL('../fixtures/abf148b-folder-payload.json', import.meta.url), 'utf8'));
+  assert.ok(isClaudeCopyResult(result, true));
+  assert.equal(isClaudeCopyResult(result), false);
+  if (result.replay.status !== 'evaluated') assert.fail('expected replay evaluation');
+  const raw = result.raw;
+  const components = Object.fromEntries(Object.entries(raw.components).map(([key, value]) => [key, {
+    ...value, states: { ...value.states, valid: 4096 },
+    value: value.value.kind === 'sum' ? { kind: 'sum', amount: (BigInt(value.value.amount) * 2048n).toString() } : value.value,
+  }]));
+  const large = { ...result, raw: { ...raw, components,
+    records: { ...raw.records, observations: 4096, accepted: 4096, withValidClaim: 4096 },
+    lines: { ...raw.lines, terminatedLines: 4096 }, files: { ...raw.files, read: 16 },
+  }, replay: { ...result.replay, eligibleObservations: 4096, exactReplayCopies: 4095 } };
+  assert.equal(isClaudeCopyResult(large, true), true);
+  assert.equal(isClaudeCopyResult({ ...large, raw: { ...large.raw, provenance: 'configured-windows-copy' } }), false);
+  assert.equal(isClaudeCopyResult({ ...large, secret: 'PRIVATE' }, true), false);
+});
+
+for (const transform of [
+  (payload: string) => payload.replace('"read":2', '"read":1'),
+  (payload: string) => payload.replace('selected-windows-folder', 'configured-windows-copy'),
+  (_payload: string) => '{"path":"PRIVATE"}',
+  (_payload: string) => 'x'.repeat(16385),
+]) {
+  test('folder analysis refuses mismatched counts, provenance and private or oversized payloads', async () => {
+    const payload = readFileSync(new URL('../fixtures/abf148b-folder-payload.json', import.meta.url), 'utf8');
+    const reader = createClaudeCopyDiagnostic(undefined, undefined, async () => 2, async () => transform(payload), async () => {});
+    await reader.chooseFolder();
+    await reader.analyzeFolder();
+    assert.equal(reader.getSnapshot().status, 'unavailable');
+    assert.doesNotMatch(renderCopyState(reader.getSnapshot()), /PRIVATE/u);
+  });
+}
+
+test('folder ignored entries preserve selected-file success and disclose incomplete coverage', async () => {
+  const value: unknown = JSON.parse(readFileSync(new URL('../fixtures/abf148b-folder-payload.json', import.meta.url), 'utf8'));
+  assert.ok(isClaudeCopyResult(value, true));
+  const incomplete = { ...value, raw: { ...value.raw, completeness: 'incomplete',
+    skipped: { total: 2, mayHideData: 2, outOfScope: 0 },
+    caveats: { ...value.raw.caveats, incompleteBatch: true, skippedInScope: true },
+  } };
+  assert.ok(isClaudeCopyResult(incomplete, true));
+  const reader = createClaudeCopyDiagnostic(undefined, undefined, async () => 2, async () => JSON.stringify(incomplete), async () => {});
+  await reader.chooseFolder();
+  await reader.analyzeFolder();
+  assert.equal(reader.getSnapshot().status, 'copy');
+  const markup = renderCopyState(reader.getSnapshot());
+  assert.match(markup, /Ignored entries: 2/u);
+  assert.match(markup, /folder coverage is incomplete/u);
+  assert.doesNotMatch(markup, /PRIVATE/u);
+});
+
+test('native folder dialog uses the tested creation restriction flags', () => {
+  const source = readFileSync(new URL('../src-tauri/src/claude_folder_dialog_windows.rs', import.meta.url), 'utf8');
+  assert.match(source, /flags: super::FOLDER_DIALOG_FLAGS,/u);
+});
+
+test('folder guidance shows revised initial safeguards and unchanged single-file limits', () => {
+  const markup = renderCopyState({ status: 'idle', attempted: false });
+  assert.match(markup, /Initial folder safeguards: 16 files, 3 MiB\/file, 24 MiB aggregate/u);
+  assert.match(markup, /Copy limits: one file, 1 MiB per file/u);
+  assert.match(markup, /Locality checks enforce admission/u);
+});

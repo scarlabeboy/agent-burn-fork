@@ -16,13 +16,26 @@ mod dialog;
 #[path = "copy_volume_windows.rs"]
 mod volume;
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+#[path = "claude_folder_dialog_windows.rs"]
+mod folder_dialog;
+
 // One identity slot per retained outcome, including ineligible observations.
 const COPY_MAX_RECORDS: usize = 1024;
+// Initial folder product safeguards; the shared collector ceilings remain unchanged.
+const FOLDER_MAX_FILE_BYTES: u64 = 3 * 1024 * 1024;
+const FOLDER_MAX_TOTAL_BYTES: u64 = 24 * 1024 * 1024;
+#[cfg(any(windows, test))]
+// BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_NONEWFOLDERBUTTON.
+const FOLDER_DIALOG_FLAGS: u32 = 0x1 | 0x40 | 0x200;
 
 pub struct CopyReader {
     root: Option<PathBuf>,
     attempted: AtomicBool,
     active: AtomicBool,
+    discarded: AtomicBool,
+    pending: std::sync::Mutex<Option<(PathBuf, PendingClaudeBatch, usize)>>,
     #[cfg(test)]
     synthetic: bool,
 }
@@ -32,6 +45,8 @@ impl CopyReader {
             root,
             attempted: AtomicBool::new(false),
             active: AtomicBool::new(false),
+            discarded: AtomicBool::new(false),
+            pending: std::sync::Mutex::new(None),
             #[cfg(test)]
             synthetic: false,
         }
@@ -96,6 +111,179 @@ impl CopyReader {
             .ok_or("COPY_PATH_REFUSED")?;
         admit_relative(relative)?;
         self.read_at(root, relative, true).map(Some)
+    }
+
+    #[cfg(windows)]
+    pub fn pick_folder(&self, owner: usize) -> Result<Option<usize>, &'static str> {
+        self.select_folder_with(|| folder_dialog::choose(owner))
+    }
+
+    fn select_folder_with(
+        &self,
+        choose: impl FnOnce() -> Result<Option<PathBuf>, &'static str>,
+    ) -> Result<Option<usize>, &'static str> {
+        let _active = self.reserve()?;
+        let selection = choose();
+        if matches!(selection, Ok(None)) {
+            // Only a genuine cancellation releases a prior Clear reservation.
+            self.discarded.store(false, Ordering::SeqCst);
+            return Ok(None);
+        }
+        self.attempted.store(true, Ordering::SeqCst);
+        let path = selection?.ok_or("COPY_DIALOG_FAILED")?;
+        self.validate_folder(&path)?;
+        let root = AuthorizedRoot::new(&path).map_err(|_| "COPY_ROOT_REFUSED")?;
+        let id = |s| OpaqueId::new(s).expect("fixed batch label");
+        #[cfg(test)]
+        let synthetic = self.synthetic;
+        #[cfg(not(test))]
+        let synthetic = false;
+        let scope = CollectionScope::new(
+            EnvironmentIdentity::windows(id("abf148b-folder-reader")),
+            SourceInstance::new(id("abf148b-folder"), Harness::ClaudeCode),
+            root,
+            if synthetic {
+                HostPolicy::AllowSimulated
+            } else {
+                HostPolicy::RequireNative
+            },
+        )
+        .map_err(|_| "COPY_PLATFORM_UNSUPPORTED")?
+        .with_limits(CollectionLimits {
+            max_file_bytes: FOLDER_MAX_FILE_BYTES,
+            max_entries: 1024,
+            max_depth: 1,
+        })
+        .map_err(|_| "COPY_READ_FAILED")?;
+        let mut names = Vec::new();
+        let mut ignored = 0;
+        // Bound both unrelated directory entries and candidate storage; never descend.
+        for (index, entry) in fs::read_dir(&path)
+            .map_err(|_| "COPY_READ_FAILED")?
+            .enumerate()
+        {
+            if index >= 1024 {
+                return Err("COPY_FOLDER_LIMIT");
+            }
+            let entry = entry.map_err(|_| "COPY_READ_FAILED")?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or("COPY_PATH_REFUSED")?;
+            if !name.ends_with(".jsonl") {
+                ignored += 1;
+                continue;
+            }
+            admit_relative(name)?;
+            if name.contains(['/', '\\']) {
+                return Err("COPY_PATH_REFUSED");
+            }
+            if !synthetic {
+                admit_selected_text(path.join(name).to_str().ok_or("COPY_PATH_REFUSED")?)?;
+            }
+            names.push(name.to_owned());
+            if names.len() > 16 {
+                return Err("COPY_FOLDER_LIMIT");
+            }
+        }
+        let refs: Vec<_> = names.iter().map(String::as_str).collect();
+        let pending = prepare_claude_jsonl_files(
+            &scope,
+            &refs,
+            ClaudeReadLimits {
+                max_files: 16,
+                max_total_bytes: FOLDER_MAX_TOTAL_BYTES,
+                max_line_bytes: 64 * 1024,
+                max_records: 4096,
+            },
+        )
+        .map_err(|_| "COPY_FOLDER_REFUSED")?;
+        self.validate_folder(&path)?;
+        let count = pending.file_count();
+        let mut slot = self.pending.lock().map_err(|_| "COPY_READ_FAILED")?;
+        if !self.discarded.load(Ordering::SeqCst) {
+            *slot = Some((path, pending, ignored));
+        }
+        Ok(Some(count))
+    }
+
+    fn validate_folder(&self, path: &Path) -> Result<(), &'static str> {
+        #[cfg(test)]
+        let synthetic = self.synthetic;
+        #[cfg(not(test))]
+        let synthetic = false;
+        if !synthetic {
+            let text = path
+                .to_str()
+                .filter(|s| s.is_ascii() && s.len() <= 259)
+                .ok_or("COPY_ROOT_REFUSED")?;
+            check_root_text(text, HostFamily::Windows).map_err(|_| "COPY_ROOT_REFUSED")?;
+            #[cfg(windows)]
+            {
+                volume::require_local_fixed(path)?;
+                volume::require_direct_fixed(path)?;
+            }
+            #[cfg(not(windows))]
+            return Err("COPY_PLATFORM_UNSUPPORTED");
+        }
+        let mut ancestors: Vec<_> = path.ancestors().collect();
+        ancestors.reverse();
+        for ancestor in ancestors {
+            let metadata = fs::symlink_metadata(ancestor).map_err(|_| "COPY_ROOT_REFUSED")?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err("COPY_ROOT_REFUSED");
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if metadata.file_attributes() & 0x400 != 0 {
+                    return Err("COPY_ROOT_REFUSED");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn analyze_folder(&self) -> Result<String, &'static str> {
+        self.active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| "COPY_BUSY")?;
+        let _active = ActiveSelection(&self.active);
+        self.attempted.store(true, Ordering::SeqCst);
+        if self.discarded.load(Ordering::SeqCst) {
+            return Err("COPY_ATTEMPT_CONSUMED");
+        }
+        let (path, pending, ignored) = self
+            .pending
+            .lock()
+            .map_err(|_| "COPY_READ_FAILED")?
+            .take()
+            .ok_or("COPY_ATTEMPT_CONSUMED")?;
+        self.validate_folder(&path)?;
+        let id = OpaqueId::new("abf148b-manual-attempt").expect("fixed label");
+        let mut batch = pending
+            .collect(&ScanRun::new(id, CaptureTime::NotRecorded))
+            .map_err(|_| "COPY_READ_FAILED")?;
+        self.validate_folder(&path)?;
+        // Ignored entries were not inspected; conservatively report unknown coverage.
+        for _ in 0..ignored {
+            batch.skipped.push(SkippedEntry::unselected());
+        }
+        if ignored > 0 {
+            batch.completeness = Completeness::Incomplete;
+        }
+        // One evaluation across every file; never add independent replay summaries.
+        let result = payload::copy_replay_payload_json(&batch.exact_replay_summary(4096))
+            .replace("configured-windows-copy", "selected-windows-folder");
+        if result.len() > 16384 {
+            return Err("COPY_RESPONSE_INVALID");
+        }
+        Ok(result)
+    }
+
+    pub fn clear_folder(&self) {
+        self.discarded.store(true, Ordering::SeqCst);
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = None;
+        }
     }
 
     fn read_at(&self, root: &Path, relative: &str, selected: bool) -> Result<String, &'static str> {

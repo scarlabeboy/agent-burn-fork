@@ -758,3 +758,113 @@ fn results_expose_no_content_paths_or_raw_identifiers_and_are_deterministic() {
     };
     assert_eq!(strip(&batch), strip(&again));
 }
+
+#[test]
+fn explicit_batch_preflights_and_orders_files_and_rejects_changed_selection() {
+    let tree = Tree::new();
+    tree.write("b.jsonl", "{}\n");
+    tree.write("a.jsonl", "{}\n{}\n");
+    let scope = scope(&tree);
+    let pending =
+        prepare_claude_jsonl_files(&scope, &["b.jsonl", "a.jsonl"], ClaudeReadLimits::default())
+            .unwrap();
+    let batch = pending.collect(&run()).unwrap();
+    assert_eq!(batch.files[0].counts.observations, 2);
+    assert_eq!(batch.files[1].file_ordinal, 1);
+    assert!(
+        prepare_claude_jsonl_files(&scope, &["a.jsonl", "A.jsonl"], ClaudeReadLimits::default())
+            .is_err()
+    );
+    let pending =
+        prepare_claude_jsonl_files(&scope, &["a.jsonl"], ClaudeReadLimits::default()).unwrap();
+    tree.write("a.jsonl", "{}\n");
+    assert!(pending.collect(&run()).is_err());
+}
+
+#[test]
+fn explicit_batch_budgets_and_unsafe_paths_are_all_or_nothing() {
+    let tree = Tree::new();
+    tree.write("a.jsonl", "{}\n".repeat(2048));
+    tree.write("b.jsonl", "{}\n".repeat(2048));
+    let scope = scope(&tree);
+    let limits = ClaudeReadLimits {
+        max_files: 16,
+        max_records: 4096,
+        ..ClaudeReadLimits::default()
+    };
+    let batch = prepare_claude_jsonl_files(&scope, &["b.jsonl", "a.jsonl"], limits)
+        .unwrap()
+        .collect(&run())
+        .unwrap();
+    assert_eq!(batch.totals().counts.observations, 4096);
+    tree.write("b.jsonl", "{}\n".repeat(2049));
+    assert!(
+        prepare_claude_jsonl_files(&scope, &["a.jsonl", "b.jsonl"], limits)
+            .unwrap()
+            .collect(&run())
+            .is_err()
+    );
+    for names in [
+        vec![],
+        vec!["a.jsonl", "a.jsonl"],
+        vec!["../a.jsonl"],
+        vec!["/a.jsonl"],
+        vec!["a.JSONL"],
+        vec!["sub/a.jsonl"],
+        vec!["missing.jsonl"],
+    ] {
+        assert!(prepare_claude_jsonl_files(&scope, &names, limits).is_err());
+    }
+    let small = ClaudeReadLimits {
+        max_total_bytes: 3,
+        ..limits
+    };
+    assert!(prepare_claude_jsonl_files(&scope, &["a.jsonl", "b.jsonl"], small).is_err());
+}
+
+#[test]
+fn explicit_batch_replay_and_conflicts_span_files_with_physical_positions() {
+    let tree = Tree::new();
+    let record = include_str!("../../../../desktop/windows-bootstrap/fixtures/abf141-replay.jsonl")
+        .lines()
+        .next()
+        .unwrap();
+    tree.write("a.jsonl", format!("\n{record}\n"));
+    tree.write("b.jsonl", format!("{record}\n"));
+    let scope = scope(&tree);
+    let batch =
+        prepare_claude_jsonl_files(&scope, &["b.jsonl", "a.jsonl"], ClaudeReadLimits::default())
+            .unwrap()
+            .collect(&run())
+            .unwrap();
+    let positions: Vec<_> = batch
+        .observations()
+        .map(|r| (r.file_ordinal, r.line_ordinal, r.byte_offset))
+        .collect();
+    assert_eq!(positions, vec![(0, 2, 1), (1, 1, 0)]);
+    let abf_collection_boundary::claude_replay::ReplayEvaluation::Evaluated(replay) =
+        batch.exact_replay_summary(4096).evaluation
+    else {
+        panic!("must evaluate");
+    };
+    assert_eq!(replay.replay_observations, 1);
+    tree.write(
+        "b.jsonl",
+        format!(
+            "{}\n",
+            record.replace("input_tokens\":10", "input_tokens\":11")
+        ),
+    );
+    let batch =
+        prepare_claude_jsonl_files(&scope, &["b.jsonl", "a.jsonl"], ClaudeReadLimits::default())
+            .unwrap()
+            .collect(&run())
+            .unwrap();
+    let abf_collection_boundary::claude_replay::ReplayEvaluation::Evaluated(replay) =
+        batch.exact_replay_summary(4096).evaluation
+    else {
+        panic!("must evaluate");
+    };
+    assert_eq!(replay.unresolved.conflicting_evidence, 2);
+    assert_eq!(replay.representatives, 0);
+}

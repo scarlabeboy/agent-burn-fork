@@ -569,3 +569,79 @@ Other synthetic tests cover request/token changes, missing/invalid identity,
 sidechains and overlapping candidate relations. These tests do not classify
 ABF142's private native observations or establish duplication. Native Windows
 IPC/WebView2 validation remains a separate authorized check.
+
+### Explicit folder batch import (ABF148B)
+
+On Windows / Claude Code, **Choose folder...** opens a genuine native Windows
+shell directory dialog. Only Rust receives the absolute directory path. Selection
+returns a sanitized pending-file count; **Analyze selected folder once** separately
+authorizes content reads. No folder path, filename or file index is accepted from
+frontend IPC. The existing single-file picker and configured-copy payload remain
+unchanged. Windows may retain its own dialog history independently of ABF.
+
+Authorization covers only immediate lowercase `.jsonl` entries in that one folder.
+No recursion, automatic source discovery, direct WSL access, persistence or
+background collection occurs. Every ignored immediate entry is counted without a
+name as potentially hiding data, including subdirectories and other extensions.
+Its type and contents are not investigated. Nonzero ignored counts mark folder
+coverage incomplete even when every selected file was read successfully. A zero
+ignored count covers only the selected immediate files, never complete source usage.
+Directory entry work stops after 1,025 pulls (at
+most 1,024 entries accepted). Subdirectories and unrelated extensions are ignored;
+a directory named with `.jsonl` is an unsafe candidate and rejects selection.
+Non-UTF-8 entry names are conservatively refused. Eligible names must satisfy the
+existing ASCII Windows path grammar. Case-folded duplicates are refused. Candidates
+are sorted by ASCII filename before collection; names remain private Rust memory.
+
+The directory must pass the existing lexical, ancestor reparse, canonical-root,
+fixed local drive and direct DOS device checks. UNC, mapped/network drives, SUBST
+aliases, detected symlinks/junctions/reparse points and uncertain locality are
+refused. Selection preflights all candidates without reading their contents:
+1..=16 files, 3 MiB/file (3,145,728 bytes), 24 MiB aggregate (25,165,824 bytes).
+These are initial product safeguards, not permanent final-product ceilings. Exact
+byte limits are admitted; one byte above either limit refuses the entire selection
+before content reads. Analysis uses 64 KiB/line and a shared
+4,096 retained-outcome budget, including rejected and oversized lines. Record
+budget exhaustion rejects the entire result. Metadata and admission are checked
+again before, during and after collection. Any file rejection, observed change
+or read failure rejects the entire batch; no partial batch is exposed. Otherwise,
+malformed/oversized lines, absent claims and pending tails retain existing explicit
+coverage caveats. Successful reads do not prove complete usage.
+
+One shared attempt guard covers folder, single-file and configured-copy flows.
+Cancellation before selection releases the reservation. A selected folder,
+refusal or analysis failure consumes it. Only a pending batch can be analyzed,
+once. Clear drops pending native state and displayed results, suppresses late
+results and never rearms a selected attempt. Concurrent selection/read calls are
+refused. Clear does not close an open dialog or interrupt an active read. Clear is sticky
+even when it arrives before the queued Choose handler starts: that selection
+cannot leave analyzable pending authority. Analyze independently rejects discarded
+state. Only a genuine dialog cancellation releases an unselected reservation.
+
+The response remains at most 16,384 bytes. Folder results use the existing aggregate
+raw/replay schema v1 with only raw provenance changed to `selected-windows-folder`.
+The strict folder validator admits at most 16 successfully read files and 4,096
+observations; legacy replay validation retains its 1,024 limit. No individual file
+locators, claimed IDs, contents, source paths or OS error details cross IPC.
+Folder completeness now follows the name-free ignored-entry coverage caveat;
+selected-file failures remain all-or-nothing. Original source/environment remain
+unestablished. One `ClaudeBatch` preserves
+file/line positions internally and evaluates replay/conflicts across all files;
+independent replay summaries are never added. No billed or unique consumption is
+inferred. ABF144 snapshots and ABF147 synthetic separation are reused.
+
+Contract A V2 residual limits apply: path checks and opens are non-atomic, with no
+wall-time I/O deadline or protection against same-metadata rewrites or privileged
+concurrent namespace changes. This is not a coherent filesystem snapshot. New
+files appearing after selection are outside the pending selection and are not read.
+Native Windows compilation/dialog execution and Windows reparse checks remain
+NOT_RUN in Linux synthetic validation. The release Linux synthetic 4,096-record
+maximum-identity metadata-conflict case took 3.87 seconds; this is not a Windows
+performance claim. Replay remains bounded O(n^2), on a blocking worker thread.
+
+ABF148D adds `BIF_NONEWFOLDERBUTTON` to the native directory dialog flags to hide
+the New Folder control where supported. This does not prevent all shell writes,
+context-menu actions or network browsing. The post-selection fixed-local-volume,
+DOS-device and path admission checks remain the enforcement boundary. The shared
+256 MiB/file and 1 GiB/batch ceilings already admit the revised 3 MiB/24 MiB
+budgets; those ceilings and the legacy single-file 1 MiB limits are unchanged.
