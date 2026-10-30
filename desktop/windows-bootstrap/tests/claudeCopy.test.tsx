@@ -13,6 +13,66 @@ const golden = JSON.stringify({ schemaVersion: 1, raw: JSON.parse(rawGolden), re
 const copy: unknown = JSON.parse(rawGolden);
 assert.ok(isClaudeCopySummary(copy));
 
+const failureGuidance = [
+  ['COPY_PATH_REFUSED', /The selected path or file is unsupported/u],
+  ['COPY_ROOT_REFUSED', /The selected location could not be accepted/u],
+  ['COPY_LOCALITY_UNCOVERED', /A supported local fixed drive could not be confirmed/u],
+  ['COPY_PLATFORM_UNSUPPORTED', /This reader requires a supported Windows environment/u],
+  ['COPY_DIALOG_FAILED', /The Windows file dialog could not complete/u],
+  ['COPY_NOT_CONFIGURED', /The optional legacy copy root is not configured/u],
+  ['COPY_ATTEMPT_CONSUMED', /The one-read attempt has already been used/u],
+  ['COPY_BUSY', /Another selection or read is already in progress/u],
+  ['COPY_READ_FAILED', /The read could not return a usable result/u],
+  ['COPY_RESPONSE_INVALID', /The result could not be validated/u],
+] as const;
+
+function renderCopyState(state: CopyDiagnosticState): string {
+  return renderToStaticMarkup(createElement(ShellView, {
+    selection: { environment: 'windows', harness: 'claude-code' },
+    onSelectEnvironment: () => {}, onSelectHarness: () => {}, copyDiagnostic: state,
+  }));
+}
+
+for (const [code, explanation] of failureGuidance) {
+  test(`${code} explains the failure with a compact code and restart guidance`, async () => {
+    const reader = createClaudeCopyDiagnostic(async () => golden, async () => { throw code; });
+    await reader.choose();
+    const markup = renderCopyState(reader.getSnapshot());
+    const status = markup.match(/<p[^>]*role="status"[^>]*>(.*?)<\/p>/u)?.[1] ?? '';
+    assert.match(status, explanation);
+    assert.match(status, /Restart the app before another attempt/u);
+    assert.doesNotMatch(status, /COPY_/u);
+    assert.ok(markup.includes(`<details><summary>Technical detail</summary><p class="page-note"><code>${code}</code></p></details>`));
+    assert.match(markup, /A refused selection consumes the one-read attempt/u);
+    assert.match(markup, /Windows may retain dialog history independently of ABF/u);
+    assert.match(markup, /disabled=""[^>]*>Choose JSONL file/u);
+    reader.clear();
+    const cleared = renderCopyState(reader.getSnapshot());
+    assert.doesNotMatch(cleared, /Technical detail|<code>COPY_/u);
+    assert.match(cleared, /Restart the app before another attempt/u);
+  });
+}
+
+for (const error of [new Error('PRIVATE C:\\secret.jsonl OS error 123'),
+  'COPY_PATH_REFUSED PRIVATE source content', { message: 'PRIVATE credential' }]) {
+  test('unknown failures render safe generic guidance without rejection details', async () => {
+    const reader = createClaudeCopyDiagnostic(async () => golden, async () => { throw error; });
+    await reader.choose();
+    const markup = renderCopyState(reader.getSnapshot());
+    assert.match(markup, /The read could not return a usable result/u);
+    assert.match(markup, /<code>COPY_READ_FAILED<\/code>/u);
+    assert.doesNotMatch(markup, /PRIVATE|secret|OS error 123|credential|source content/u);
+  });
+}
+
+test('invalid picker result gives validation guidance without exposing payload content', async () => {
+  const reader = createClaudeCopyDiagnostic(async () => golden, async () => '{"secret":"PRIVATE"}');
+  await reader.choose();
+  const markup = renderCopyState(reader.getSnapshot());
+  assert.match(markup, /The result could not be validated/u);
+  assert.doesNotMatch(markup, /PRIVATE|secret/u);
+});
+
 test('picker cancellation reads nothing and allows either entry path afterwards', async () => {
   let legacyCalls = 0;
   const reader = createClaudeCopyDiagnostic(async () => { legacyCalls++; return golden; }, async () => null);
@@ -46,6 +106,9 @@ test('Clear during a cancelled dialog does not consume a nonexistent read attemp
   const reader = createClaudeCopyDiagnostic(async () => golden, () => new Promise((resolve) => { finish = resolve; }));
   const pending = reader.choose();
   reader.clear();
+  const cleared = renderCopyState(reader.getSnapshot());
+  assert.match(cleared, /unless the open dialog is cancelled without a selection/u);
+  assert.match(cleared, /Clear does not close the dialog or cancel a read/u);
   finish(null);
   await pending;
   assert.deepEqual(reader.getSnapshot(), { status: 'cancelled', attempted: false });
@@ -115,6 +178,8 @@ test('cancelled picker renders ready controls and a no-read cancellation status'
   }));
   assert.match(markup, /Cancelled\. No source read; the attempt is still available/u);
   assert.match(markup, /<button type="button">Choose JSONL file\.\.\.<\/button>/u);
+  assert.doesNotMatch(markup, /Technical detail|<code>COPY_/u);
+  assert.doesNotMatch(markup.match(/<p[^>]*role="status"[^>]*>(.*?)<\/p>/u)?.[1] ?? '', /restart|consumed/ui);
 });
 test('copy validator requires separate provenance and strict numerical payload', () => {
   assert.equal(isClaudeCopySummary(copy), true);

@@ -272,6 +272,19 @@ function ClaudeCopySnapshot({ summary, replay }: Readonly<{
   </>;
 }
 
+const copyFailureGuidance = {
+  COPY_PATH_REFUSED: 'The selected path or file is unsupported. Use an ordinary local folder and a file with a lowercase .jsonl extension; unsupported names and detected redirections are refused.',
+  COPY_ROOT_REFUSED: 'The selected location could not be accepted. Check that the file is in an ordinary local folder; for the legacy flow, check the configured copy root. The exact cause is unavailable.',
+  COPY_LOCALITY_UNCOVERED: 'A supported local fixed drive could not be confirmed. Use a directly attached local fixed drive; network, mapped, removable and unconfirmed drives are unsupported.',
+  COPY_PLATFORM_UNSUPPORTED: 'This reader requires a supported Windows environment. Use the Windows app for this workflow.',
+  COPY_DIALOG_FAILED: 'The Windows file dialog could not complete. Restart the app and open the picker again; the exact cause is unavailable.',
+  COPY_NOT_CONFIGURED: 'The optional legacy copy root is not configured. After restarting, use Choose JSONL file... without copy-root setup, or arrange the legacy configuration before starting the app.',
+  COPY_ATTEMPT_CONSUMED: 'The one-read attempt has already been used. Clear removes the displayed result but does not enable another read.',
+  COPY_BUSY: 'Another selection or read is already in progress. Let it finish; Clear does not close the dialog or cancel the read.',
+  COPY_READ_FAILED: 'The read could not return a usable result. Check that the file is available and readable before trying again; the exact cause is unavailable.',
+  COPY_RESPONSE_INVALID: 'The result could not be validated. No unvalidated values are shown. If this repeats after restarting, report the technical code.',
+} satisfies Record<Extract<CopyDiagnosticState, { status: 'unavailable' }>['code'], string>;
+
 function ClaudeCopyPanel({ state, onRun, onChoose, onClear }: Readonly<{
   state: CopyDiagnosticState; onRun?: (relativePath: string) => void; onChoose?: () => void; onClear?: () => void;
 }>): React.JSX.Element {
@@ -285,7 +298,8 @@ function ClaudeCopyPanel({ state, onRun, onChoose, onClear }: Readonly<{
     <button type="button" disabled={state.attempted}
       onClick={() => { onChoose?.(); setRelativePath(''); }}>Choose JSONL file...</button>
     <p className="page-note">Choose one local fixed-drive .jsonl file in the native Windows dialog. No copy-root setup is required.
-      Cancelling reads no source and leaves the attempt available. Network paths, mapped drives and detected redirections are refused.</p>
+      Cancelling reads no source and leaves the attempt available. A refused selection consumes the one-read attempt; restart the app to choose again.
+      Network paths, mapped drives and detected redirections are refused. Windows may retain dialog history independently of ABF.</p>
     <details><summary>Configured copy root (optional legacy flow)</summary>
       <label>Relative JSONL path (use / between folders)
         <input value={relativePath} maxLength={512} disabled={state.attempted}
@@ -301,12 +315,15 @@ function ClaudeCopyPanel({ state, onRun, onChoose, onClear }: Readonly<{
         : state.status === 'cancelled' ? 'Cancelled. No source read; the attempt is still available.'
         : state.status === 'selecting' ? 'Native file selection or read in progress. No result yet.'
         : state.status === 'running' ? 'Reading selected copy. No result yet.'
-          : state.status === 'cleared' ? 'Result cleared from memory. Attempt remains consumed; late results are discarded.'
-            : state.status === 'unavailable' ? `Unavailable: ${state.code}. No result; restart required for another attempt.`
+          : state.status === 'cleared' ? 'Result cleared from memory; late results are discarded. Attempt remains consumed unless the open dialog is cancelled without a selection. Restart the app before another attempt after a selection or failure. Clear does not close the dialog or cancel a read.'
+            : state.status === 'unavailable' ? `${copyFailureGuidance[state.code]} No result is available. Restart the app before another attempt.`
               : state.status === 'copy' ? (state.summary.files.read === 0 ? 'File was not read successfully. See file failure counts; no usage conclusion is available.'
                 : state.summary.records.withValidClaim === 0 ? 'File read succeeded; no valid token claims were recognized. This does not establish zero usage or a parser defect.'
                   : 'File read succeeded; valid token claims were recognized. Sums describe observed record claims only.') : ''
     }</p>
+    {state.status === 'unavailable' ? <details><summary>Technical detail</summary>
+      <p className="page-note"><code>{state.code}</code></p>
+    </details> : null}
     {state.status === 'copy' ? <>
       <p className="page-note">Captured once; current freshness is unknown. Complete file reading does not establish
         complete usage. Session events and records with absent or null usage can have no token claims.</p>

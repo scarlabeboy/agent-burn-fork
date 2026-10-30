@@ -359,6 +359,13 @@ Native errors are fixed codes only: `COPY_NOT_CONFIGURED`, `COPY_ATTEMPT_CONSUME
 `COPY_PATH_REFUSED`, `COPY_ROOT_REFUSED`, `COPY_LOCALITY_UNCOVERED`,
 `COPY_PLATFORM_UNSUPPORTED`, `COPY_READ_FAILED`, `COPY_BUSY`, `COPY_DIALOG_FAILED`
 or `COPY_RESPONSE_INVALID`; unknown rejection details become `COPY_READ_FAILED`.
+The UI explains each failure with a suggested next step and keeps the fixed code
+in a collapsed **Technical detail** disclosure. Shared codes do not identify an
+exact cause. A refused selection consumes the one-read attempt and requires an
+app restart; cancellation alone leaves it available. Clear removes the displayed
+explanation and code without rearming a consumed attempt. These messages expose
+no OS error, selected path or source content. Windows may still retain dialog
+history independently of ABF, as described above.
 The summary's file failure codes remain numerical counts (`path`, `tooLarge`,
 `byteBudget`, `outputLimit`, `changedDuringRead`, `io`).
 
