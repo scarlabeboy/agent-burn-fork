@@ -1,4 +1,5 @@
 import type { ClaudeCopyReplay } from './claudeCopyReplay.ts';
+import type { ClaudeCopyActivity } from './claudeCopyActivity.ts';
 import * as React from 'react';
 import { aggregateSynthetic } from './syntheticAggregation.ts';
 import { syntheticBridge } from './syntheticBridge.ts';
@@ -274,6 +275,32 @@ function ClaudeCopySnapshot({ summary, replay }: Readonly<{
   </>;
 }
 
+function ClaudeDailyActivity({ activity }: Readonly<{ activity?: ClaudeCopyActivity; }>): React.JSX.Element {
+  return <div aria-label="Claude daily claims">
+    <h4>Claude daily claims</h4>
+    <p className="page-note">Selected Windows folder; original environment not established. Dates are normalized record claims in UTC.
+      Repeated observations remain counted; duplicate identity is unresolved. These are not unique events or billed consumption.</p>
+    {activity?.status === 'available' ? (activity.rows.length === 0
+      ? <p className="page-note">No observations available; this does not establish zero usage.</p>
+      : <div className="copy-details__content" tabIndex={0} role="region" aria-label="Daily claims table"><table className="table">
+        <caption>Raw observed claims by UTC day</caption>
+        <thead><tr><th scope="col">UTC day</th><th scope="col">Observations</th>
+          {claudeComponents.map(([id, label]) => <th key={id} scope="col">{label}</th>)}</tr></thead>
+        <tbody>{activity.rows.map((row) => <tr key={row.day ?? 'undated'}>
+          <th scope="row">{row.day ?? 'Undated'}</th><td>{row.observations}</td>
+          {claudeComponents.map(([id]) => <td key={id}>{row.components[id].value.kind === 'sum'
+            ? row.components[id].value.amount : claudeValueText(row.components[id], false)}
+            {row.components[id].states.valid > 0 && row.components[id].states.valid < row.observations
+              ? <span className="page-note"> ({row.observations - row.components[id].states.valid} without valid claims)</span> : null}</td>)}
+        </tr>)}</tbody>
+      </table></div>) : <p className="page-note">{activity?.status === 'budget-exhausted'
+        ? 'Daily activity unavailable - projection budget exceeded. Diagnostic result retained.'
+        : 'Daily activity unavailable - projection not provided. Diagnostic result retained.'}</p>}
+    <p className="page-note">Missing, invalid or unsupported dates are undated. Components stay separate; missing claims are not zero.
+      Reading and token coverage caveats in the snapshot apply to every daily row. Complete usage is not established.</p>
+  </div>;
+}
+
 const copyFailureGuidance = {
   COPY_FOLDER_REFUSED: 'The folder batch could not be accepted. Use 1 to 16 safe lowercase .jsonl files within the stated byte limits. No partial result is available.',
   COPY_FOLDER_LIMIT: 'The folder exceeds the file or directory entry limit. Use at most 16 JSONL files and 1,024 immediate entries.',
@@ -353,6 +380,7 @@ function ClaudeCopyPanel({ state, onRun, onChoose, onClear, onChooseFolder, onAn
         <p className="page-note">A file or byte budget can prevent reading. Record budget exhaustion discards all claims from the file;
           no truncated prefix total is published. Restart is required for another attempt.</p> : null}
       <ClaudeCopySnapshot summary={state.summary} replay={state.replay} />
+      {state.summary.provenance === 'selected-windows-folder' ? <ClaudeDailyActivity activity={state.activity} /> : null}
       <details className="scenario copy-details"><summary>Token, parser and replay diagnostics</summary>
         <div className="copy-details__content" tabIndex={0} role="region" aria-label="Detailed copy diagnostics">
           <ClaudeCopyReplayDetails replay={state.replay} />

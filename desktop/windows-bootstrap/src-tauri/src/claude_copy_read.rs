@@ -273,6 +273,7 @@ impl CopyReader {
         // One evaluation across every file; never add independent replay summaries.
         let result = payload::copy_replay_payload_json(&batch.exact_replay_summary(4096))
             .replace("configured-windows-copy", "selected-windows-folder");
+        let result = crate::claude_copy_activity::folder_payload_json(&batch, result);
         if result.len() > 16384 {
             return Err("COPY_RESPONSE_INVALID");
         }

@@ -2,6 +2,80 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn folder_daily_payload_matches_the_frontend_golden() {
+    let tree = Tree::new();
+    let input = include_str!("../../fixtures/abf150c-daily.jsonl");
+    let first = input.lines().next().unwrap().to_owned() + "\n";
+    fs::write(tree.0.join("a.jsonl"), &first).unwrap();
+    fs::write(tree.0.join("b.jsonl"), &first).unwrap();
+    let reader = tree.reader();
+    reader
+        .select_folder_with(|| Ok(Some(tree.0.clone())))
+        .unwrap();
+    assert_eq!(
+        reader.analyze_folder().unwrap(),
+        include_str!("../../fixtures/abf150c-daily-payload.json").trim()
+    );
+}
+
+#[test]
+fn folder_daily_transport_preserves_diagnostics_and_one_shot_authority() {
+    let tree = Tree::new();
+    fs::write(
+        tree.0.join("a.jsonl"),
+        "{\"timestamp\":\"2026-01-01T12:00:00Z\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n",
+    )
+    .unwrap();
+    let reader = tree.reader();
+    assert_eq!(
+        reader.select_folder_with(|| Ok(Some(tree.0.clone()))),
+        Ok(Some(1))
+    );
+    let payload = reader.analyze_folder().unwrap();
+    assert!(payload.starts_with("{\"schemaVersion\":2,\"raw\":"));
+    assert!(payload.contains("\"replay\":"));
+    assert!(payload.contains("\"activity\":{\"status\":\"available\""));
+    assert!(payload.contains("\"day\":\"2026-01-01\""));
+    assert!(!payload.contains("12:00:00"));
+    assert_eq!(reader.analyze_folder(), Err("COPY_ATTEMPT_CONSUMED"));
+}
+
+#[test]
+fn folder_daily_budget_failure_keeps_a_valid_raw_diagnostic() {
+    let tree = Tree::new();
+    let lines = (1..=31).map(|day| format!("{{\"timestamp\":\"2026-01-{day:02}T00:00:00Z\",\"message\":{{\"usage\":{{\"input_tokens\":1}}}}}}\n"))
+        .collect::<String>() + "{\"timestamp\":\"2026-02-01T00:00:00Z\"}\n{}\n";
+    fs::write(tree.0.join("a.jsonl"), lines).unwrap();
+    let reader = tree.reader();
+    reader
+        .select_folder_with(|| Ok(Some(tree.0.clone())))
+        .unwrap();
+    let payload = reader.analyze_folder().unwrap();
+    assert!(payload.contains("\"activity\":{\"status\":\"budget-exhausted\"}"));
+    assert!(payload.contains("\"amount\":\"31\""));
+    assert!(payload.contains("\"observations\":33"));
+    assert!(payload.len() <= 16384);
+}
+
+#[test]
+fn folder_daily_byte_budget_keeps_diagnostics_without_a_partial_table() {
+    let tree = Tree::new();
+    let lines = (1..=31).map(|day| format!("{{\"timestamp\":\"2026-01-{day:02}T00:00:00Z\",\"message\":{{\"usage\":{{\"input_tokens\":1}}}}}}\n"))
+        .collect::<String>() + "{\"timestamp\":\"2026-02-01T00:00:00Z\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n";
+    fs::write(tree.0.join("a.jsonl"), lines).unwrap();
+    let reader = tree.reader();
+    reader
+        .select_folder_with(|| Ok(Some(tree.0.clone())))
+        .unwrap();
+    let payload = reader.analyze_folder().unwrap();
+    assert!(payload.contains("\"activity\":{\"status\":\"budget-exhausted\"}"));
+    assert!(payload.contains("\"amount\":\"32\""));
+    assert!(payload.contains("\"observations\":32"));
+    assert!(!payload.contains("\"day\":"));
+    assert!(payload.len() <= 16384);
+}
 struct Tree(PathBuf);
 impl Tree {
     fn new() -> Self {
@@ -493,10 +567,13 @@ fn folder_cross_file_replay_matches_aggregate_frontend_golden() {
     reader
         .select_folder_with(|| Ok(Some(tree.0.clone())))
         .unwrap();
+    let payload = reader.analyze_folder().unwrap();
+    let diagnostic = payload.split_once(",\"activity\":").unwrap().0.to_owned() + "}";
     assert_eq!(
-        reader.analyze_folder().unwrap(),
+        diagnostic.replacen("{\"schemaVersion\":2,", "{\"schemaVersion\":1,", 1),
         include_str!("../../fixtures/abf148b-folder-payload.json").trim()
     );
+    assert!(payload.contains("\"day\":null,\"observations\":2"));
 }
 
 #[test]

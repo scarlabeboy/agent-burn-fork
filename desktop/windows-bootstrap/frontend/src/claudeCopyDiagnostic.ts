@@ -3,6 +3,8 @@ import type { ClaudeCopyReplay } from './claudeCopyReplay.ts';
 import { invoke } from '@tauri-apps/api/core';
 import { isClaudeClaimSummary } from './fictionalClaudeBridge.ts';
 import type { ClaudeClaimSummary } from './fictionalClaudeBridge.ts';
+import { isClaudeCopyActivity } from './claudeCopyActivity.ts';
+import type { ClaudeCopyActivity } from './claudeCopyActivity.ts';
 
 export type ClaudeCopySummary = ClaudeClaimSummary & Readonly<{
   provenance: 'configured-windows-copy' | 'selected-windows-folder'; originalSource: 'not-established'; originalEnvironment: 'not-established';
@@ -17,12 +19,17 @@ export function isClaudeCopySummary(value: unknown, folder = false): value is Cl
     && record.originalEnvironment === 'not-established' && isClaudeClaimSummary(value);
 }
 
-export type ClaudeCopyResult = Readonly<{ schemaVersion: 1; raw: ClaudeCopySummary; replay: ClaudeCopyReplay }>;
+export type ClaudeCopyResult =
+  | Readonly<{ schemaVersion: 1; raw: ClaudeCopySummary; replay: ClaudeCopyReplay }>
+  | Readonly<{ schemaVersion: 2; raw: ClaudeCopySummary; replay: ClaudeCopyReplay; activity: ClaudeCopyActivity }>;
 export function isClaudeCopyResult(value: unknown, folder = false): value is ClaudeCopyResult {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const result = value as Record<string, unknown>;
-  return Object.keys(result).length === 3 && result.schemaVersion === 1
+  const envelope = (Object.keys(result).length === 3 && result.schemaVersion === 1)
+    || (folder && Object.keys(result).length === 4 && result.schemaVersion === 2 && Object.hasOwn(result, 'activity'));
+  return envelope
     && isClaudeCopySummary(result.raw, folder) && isClaudeCopyReplay(result.replay, result.raw, folder ? 4096 : 1024)
+    && (result.schemaVersion === 1 || isClaudeCopyActivity(result.activity, result.raw))
     && (!folder || (result.raw.files.read >= 1 && result.raw.files.read <= 16 && result.raw.files.rejected === 0 && result.raw.completeness === (result.raw.skipped.mayHideData > 0 ? 'incomplete' : 'complete')
       && result.raw.skipped.total === result.raw.skipped.mayHideData && result.raw.skipped.total <= 1024 - result.raw.files.read && result.raw.records.observations <= 4096));
 }
@@ -36,7 +43,7 @@ export type CopyDiagnosticState =
   | Readonly<{ status: 'selecting' | 'running' | 'cleared'; attempted: true }>
   | Readonly<{ status: 'unavailable'; attempted: true; code: FailureCode }>
   | Readonly<{ status: 'pending'; attempted: true; count: number }>
-  | Readonly<{ status: 'copy'; attempted: true; summary: ClaudeCopySummary; replay: ClaudeCopyReplay }>;
+  | Readonly<{ status: 'copy'; attempted: true; summary: ClaudeCopySummary; replay: ClaudeCopyReplay; activity?: ClaudeCopyActivity }>;
 export function createClaudeCopyDiagnostic(
   request: (relativePath: string) => Promise<unknown> = (relativePath) => invoke<unknown>('abf_read_claude_copy_once', { relativePath }),
   choose: () => Promise<unknown> = () => invoke<unknown>('abf_choose_claude_jsonl_once'),
@@ -69,7 +76,8 @@ export function createClaudeCopyDiagnostic(
       let value: unknown = null;
       try { value = typeof raw === 'string' && raw.length <= 16384 ? JSON.parse(raw) : null; } catch { /* Invalid transport remains unavailable. */ }
       if ((!folder || analyzing) && isClaudeCopyResult(value, folder)
-        && (!analyzing || value.raw.files.read === pendingCount)) next = { status: 'copy', attempted: true, summary: value.raw, replay: value.replay };
+        && (!analyzing || value.raw.files.read === pendingCount)) next = { status: 'copy', attempted: true, summary: value.raw, replay: value.replay,
+          ...(value.schemaVersion === 2 ? { activity: value.activity } : {}) };
     } catch (error) {
       const code = codes.find((code) => error === code) ?? 'COPY_READ_FAILED';
       next = { status: 'unavailable', attempted: true, code };

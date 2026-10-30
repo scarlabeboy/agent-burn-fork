@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import './claudeCopyActivity.test.tsx';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { createElement } from 'react';

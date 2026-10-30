@@ -30,6 +30,8 @@
 
 #![forbid(unsafe_code)]
 
+pub use abf_parser::Field as ClaudeField;
+
 pub mod claude_demo;
 pub mod claude_jsonl;
 pub mod claude_replay;

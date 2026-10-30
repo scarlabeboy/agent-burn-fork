@@ -619,8 +619,9 @@ even when it arrives before the queued Choose handler starts: that selection
 cannot leave analyzable pending authority. Analyze independently rejects discarded
 state. Only a genuine dialog cancellation releases an unselected reservation.
 
-The response remains at most 16,384 bytes. Folder results use the existing aggregate
-raw/replay schema v1 with only raw provenance changed to `selected-windows-folder`.
+The response remains at most 16,384 bytes. ABF150C folder results use envelope v2
+with the unchanged aggregate raw/replay objects and a bounded daily activity object.
+Raw provenance remains `selected-windows-folder`. Single-file transport remains v1.
 The strict folder validator admits at most 16 successfully read files and 4,096
 observations; legacy replay validation retains its 1,024 limit. No individual file
 locators, claimed IDs, contents, source paths or OS error details cross IPC.
@@ -653,3 +654,69 @@ legacy single-file reader retains its 64 KiB line limit. Both reuse the existing
 (Vec allocation growth can reserve more). Oversized lines are still discarded
 while streaming and reported explicitly; successful reads do not establish
 complete token coverage. The parser, replay rules and all other limits are unchanged.
+
+### Bounded daily Claude claims (ABF150C)
+
+After **Analyze selected folder once**, Windows / Claude Code displays a
+chronological UTC daily table with separate input, output, cache creation and
+cache read claim sums. The table uses the existing `ClaudeBatch` and raw summary
+logic over each day's retained observations. Every observation counts, including
+repeats; no replay representative subset is used. Explicit zero, no valid claims,
+and overflow remain distinct. Partial component sums disclose how many observations
+lack valid claims for that component. No combined token total is introduced.
+
+The label is **Selected Windows folder; original environment not established**.
+Windows describes the acquisition location, not the origin of the selected data.
+Daily values never enter synthetic dashboards, Windows totals or Computer.
+Missing, invalid or unsupported timestamp claims appear in an **Undated** bucket
+after the dated rows. The supported timestamp subset is years 0001 through 9999,
+valid Gregorian calendar dates, seconds 00 through 59, optionally 1 through 9
+fractional digits, and `Z` or a numeric offset with hours 00 through 23 and minutes
+00 through 59. Unknown `-00:00`, unsupported forms and UTC conversions outside
+the supported years are undated. Days normalize to UTC before grouping.
+
+Activity is limited to 32 buckets including Undated. Its byte budget is the space
+remaining within the existing 16,384-byte response cap after diagnostics and
+envelope overhead. Exceeding either budget returns the fixed activity status
+`budget-exhausted`; no partial activity table is published and the valid raw/replay
+diagnostic remains visible. As a defensive fallback, if even that status cannot
+fit, the unchanged v1 diagnostic is returned and activity displays as not provided.
+The frontend accepts historical folder v1 results for this fallback and validates
+v2 days, exact keys, sorted unique buckets, component states and sums against raw
+diagnostics. The private projection is not a production event or persistence schema.
+
+Only normalized calendar days, numerical claims, bounded counts and fixed statuses
+are added to IPC. Raw timestamps, model names, file locators, paths, identities and
+content remain in Rust memory. The collection-boundary `ClaudeField` re-export is
+an alias of the existing parser field enum; the collection `Field` is unchanged.
+Projection performs no additional I/O, clock reads, discovery or collection. It
+keeps at most 4,096 line positions, 32 bucket summaries and one scratch batch;
+scratch lines reuse the actual raw summary's cache-creation and overflow rules.
+
+Clear discards activity together with the diagnostic and suppresses late results.
+Navigation retains the result without rereading; only Windows / Claude Code shows
+it. Existing incomplete-folder, parser-gap and pending-tail caveats remain visible
+and apply to the daily rows. Empty activity means no retained observations, never
+zero usage. Freshness remains unknown after the manual read.
+
+Focused offline validation with existing installed dependencies:
+
+```sh
+# Repository root; synthetic standalone harness, no Tauri build.
+cargo test --offline --locked --manifest-path desktop/windows-bootstrap/diagnostic-tests/Cargo.toml -- --skip folder_worst_case_4096_conflicts_are_bounded_and_private
+# desktop/windows-bootstrap
+node --import tsx --test --test-isolation=none tests/claudeCopy.test.tsx tests/App.test.tsx
+node_modules/.bin/tsc --noEmit -p tsconfig.app.json
+node_modules/.bin/tsc --noEmit -p tsconfig.node.json
+node_modules/.bin/tsc --noEmit -p tsconfig.test.json
+node_modules/.bin/vite build --config vite.config.ts
+```
+
+`claudeCopy.test.tsx` imports the new activity tests, including them in the existing
+package test script without changing dependencies or scripts.
+The skipped historical replay stress test is unaffected by daily grouping;
+focused activity tests cover 4,096 observations without rerunning its quadratic
+replay campaign. The new golden payload is checked byte-for-byte by the actual
+folder reader and consumed by frontend tests. Native Windows compilation/run,
+WebView2 IPC and rendering, Windows filesystem checks, private histories and WSL
+execution remain NOT_RUN. Synthetic validation grants no production access.

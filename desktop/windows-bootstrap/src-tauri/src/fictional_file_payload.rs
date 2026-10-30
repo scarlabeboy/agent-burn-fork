@@ -33,7 +33,7 @@ fn states(states: &ClaimStates) -> String {
     ])
 }
 
-fn component(component: &ComponentSummary) -> String {
+pub(super) fn component(component: &ComponentSummary) -> String {
     let value = match component.value {
         ComponentValue::ReportedClaimSum(sum) => {
             object(&[("kind", text("sum")), ("amount", text(&sum.to_string()))])

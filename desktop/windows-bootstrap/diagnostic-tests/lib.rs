@@ -1,5 +1,10 @@
 #![deny(unsafe_code)]
 #[cfg(test)]
+mod activity_tests;
+#[cfg(test)]
+#[path = "../src-tauri/src/claude_copy_activity.rs"]
+mod claude_copy_activity;
+#[cfg(test)]
 #[path = "../src-tauri/src/claude_copy_read.rs"]
 mod claude_copy_read;
 #[cfg(test)]

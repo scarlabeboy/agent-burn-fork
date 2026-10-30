@@ -5,6 +5,8 @@
 compile_error!("ABF Windows Bootstrap supports Windows x64 only");
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+mod claude_copy_activity;
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 mod claude_copy_read;
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 mod fictional_claude_summary;
