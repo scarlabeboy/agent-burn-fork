@@ -600,7 +600,8 @@ refused. Selection preflights all candidates without reading their contents:
 1..=16 files, 3 MiB/file (3,145,728 bytes), 24 MiB aggregate (25,165,824 bytes).
 These are initial product safeguards, not permanent final-product ceilings. Exact
 byte limits are admitted; one byte above either limit refuses the entire selection
-before content reads. Analysis uses 64 KiB/line and a shared
+before content reads. Analysis uses 256 KiB/line (262,144 bytes, including CR but
+excluding LF) and a shared
 4,096 retained-outcome budget, including rejected and oversized lines. Record
 budget exhaustion rejects the entire result. Metadata and admission are checked
 again before, during and after collection. Any file rejection, observed change
@@ -645,3 +646,10 @@ context-menu actions or network browsing. The post-selection fixed-local-volume,
 DOS-device and path admission checks remain the enforcement boundary. The shared
 256 MiB/file and 1 GiB/batch ceilings already admit the revised 3 MiB/24 MiB
 budgets; those ceilings and the legacy single-file 1 MiB limits are unchanged.
+
+ABF149 raises only the explicit folder line limit from 64 KiB to 256 KiB. The
+legacy single-file reader retains its 64 KiB line limit. Both reuse the existing
+64 KiB streaming I/O chunks; the folder line buffer is now limited to 256 KiB
+(Vec allocation growth can reserve more). Oversized lines are still discarded
+while streaming and reported explicitly; successful reads do not establish
+complete token coverage. The parser, replay rules and all other limits are unchanged.

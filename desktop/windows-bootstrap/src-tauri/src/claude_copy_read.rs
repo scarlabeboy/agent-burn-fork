@@ -191,7 +191,7 @@ impl CopyReader {
             ClaudeReadLimits {
                 max_files: 16,
                 max_total_bytes: FOLDER_MAX_TOTAL_BYTES,
-                max_line_bytes: 64 * 1024,
+                max_line_bytes: 256 * 1024,
                 max_records: 4096,
             },
         )

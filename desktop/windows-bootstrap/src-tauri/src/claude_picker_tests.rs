@@ -676,6 +676,126 @@ fn cleared_queued_folder_failure_remains_consumed() {
 }
 
 #[test]
+fn folder_line_limit_accepts_256_kib_with_lf_or_crlf_across_io_chunks() {
+    let record = include_str!("../../fixtures/abf141-replay.jsonl")
+        .lines()
+        .next()
+        .unwrap();
+    for (ending, cr_bytes) in [("\n", 0), ("\r\n", 1)] {
+        let tree = Tree::new();
+        // CR counts toward the limit; LF does not. LF starts the fifth I/O chunk.
+        let line = format!(
+            "{record}{}{ending}",
+            " ".repeat(262144 - cr_bytes - record.len())
+        );
+        assert_eq!(line.len(), 262145);
+        fs::write(tree.0.join("a.jsonl"), line).unwrap();
+        let reader = tree.reader();
+        assert_eq!(
+            reader.select_folder_with(|| Ok(Some(tree.0.clone()))),
+            Ok(Some(1))
+        );
+        let result = reader.analyze_folder().unwrap();
+        assert!(result.contains("\"observations\":1"));
+        assert!(result.contains("\"oversized\":0"));
+        assert!(result.contains("\"amount\":\"10\""));
+        assert!(result.contains("\"provenance\":\"selected-windows-folder\""));
+        assert!(result.len() <= 16384);
+    }
+}
+
+#[test]
+fn folder_line_limit_rejects_256_kib_plus_one_and_resumes_after_lf_or_crlf() {
+    let record = include_str!("../../fixtures/abf141-replay.jsonl")
+        .lines()
+        .next()
+        .unwrap();
+    for (ending, cr_bytes) in [("\n", 0), ("\r\n", 1)] {
+        let tree = Tree::new();
+        let line = format!(
+            "{record}{}{ending}",
+            " ".repeat(262145 - cr_bytes - record.len())
+        );
+        assert_eq!(line.len(), 262146);
+        fs::write(tree.0.join("a.jsonl"), format!("{line}{record}\n")).unwrap();
+        let reader = tree.reader();
+        reader
+            .select_folder_with(|| Ok(Some(tree.0.clone())))
+            .unwrap();
+        let result = reader.analyze_folder().unwrap();
+        assert!(result.contains("\"observations\":1"));
+        assert!(result.contains("\"oversized\":1"));
+        assert!(result.contains("\"unparsedLines\":true"));
+        assert!(result.contains("\"amount\":\"10\""));
+    }
+}
+
+#[test]
+fn folder_crlf_split_at_64_kib_boundary_preserves_claims_and_cross_file_replay() {
+    let tree = Tree::new();
+    let record = include_str!("../../fixtures/abf141-replay.jsonl")
+        .lines()
+        .next()
+        .unwrap();
+    // CR is the final byte of the first chunk, LF is the first of the next.
+    fs::write(
+        tree.0.join("a.jsonl"),
+        format!("{record}{}\r\n", " ".repeat(65535 - record.len())),
+    )
+    .unwrap();
+    fs::write(
+        tree.0.join("b.jsonl"),
+        format!("{record}{}\n", " ".repeat(199922 - record.len())),
+    )
+    .unwrap();
+    let reader = tree.reader();
+    assert_eq!(
+        reader.select_folder_with(|| Ok(Some(tree.0.clone()))),
+        Ok(Some(2))
+    );
+    let result = reader.analyze_folder().unwrap();
+    assert!(result.contains("\"observations\":2"));
+    assert!(result.contains("\"oversized\":0"));
+    assert!(result.contains("\"amount\":\"20\""));
+    assert!(result.contains("\"representatives\":1,\"exactReplayCopies\":1"));
+}
+
+#[test]
+fn folder_large_lines_and_rejections_share_the_4096_retained_outcome_budget() {
+    let tree = Tree::new();
+    let record = include_str!("../../fixtures/abf141-replay.jsonl")
+        .lines()
+        .next()
+        .unwrap();
+    let line = format!("{record}{}", " ".repeat(262144 - record.len()));
+    fs::write(
+        tree.0.join("a.jsonl"),
+        format!("{}[\n", "{}\n".repeat(4093)),
+    )
+    .unwrap();
+    fs::write(tree.0.join("b.jsonl"), format!("{line}\n{line} \n")).unwrap();
+    let reader = tree.reader();
+    reader
+        .select_folder_with(|| Ok(Some(tree.0.clone())))
+        .unwrap();
+    let result = reader.analyze_folder().unwrap();
+    assert!(result.contains("\"observations\":4094"));
+    assert!(result.contains("\"rejected\":{\"total\":1"));
+    assert!(result.contains("\"oversized\":1"));
+    assert!(result.contains("\"unparsedLines\":true"));
+    assert!(result.contains("\"amount\":\"10\""));
+    assert!(result.len() <= 16384);
+
+    fs::write(tree.0.join("b.jsonl"), format!("{line}\n{line} \n{{}}\n")).unwrap();
+    let reader = tree.reader();
+    reader
+        .select_folder_with(|| Ok(Some(tree.0.clone())))
+        .unwrap();
+    assert_eq!(reader.analyze_folder(), Err("COPY_READ_FAILED"));
+    assert_eq!(reader.analyze_folder(), Err("COPY_ATTEMPT_CONSUMED"));
+}
+
+#[test]
 fn folder_record_budget_is_shared_and_partial_file_failure_rejects_everything() {
     let tree = Tree::new();
     fs::write(tree.0.join("a.jsonl"), "{}\n".repeat(2048)).unwrap();

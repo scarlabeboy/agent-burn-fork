@@ -320,6 +320,9 @@ LF-terminated line to `abf_parser::parse_claude_long`. It adds one sibling depen
   parsed. Blank lines are counted, not retained. Lines are streamed in 64 KiB chunks; a line over
   `max_line_bytes` (ceiling 8 MiB) is discarded as it streams and reported `Oversized`, so
   buffering is bounded by the line limit, not the file size (allocation-tracked test).
+  The [Windows bootstrap folder import](../../../desktop/windows-bootstrap/README.md#explicit-folder-batch-import-abf148b)
+  sets 256 KiB (262,144 bytes) per line; its legacy single-file reader keeps 64 KiB.
+  These caller limits include CR and exclude LF; collector defaults and ceilings are unchanged.
 - **Budgets (explicit, coded rejections, nothing truncated or zeroed):** scope depth and
   directory entries (`CollectionLimits`), per-file bytes (`max_file_bytes`), and
   `ClaudeReadLimits`: files (more candidates fail the batch, no subset), bytes per batch, line

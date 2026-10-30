@@ -309,7 +309,7 @@ function ClaudeCopyPanel({ state, onRun, onChoose, onClear, onChooseFolder, onAn
     {state.status === 'pending' ? <p className="page-note">Pending files: {state.count}. Contents have not been read.</p> : null}
     <button type="button" disabled={state.status !== 'pending'} onClick={onAnalyzeFolder}>Analyze selected folder once</button>
     <p className="page-note">Folder authorization covers immediate lowercase .jsonl files only; no recursion.
-      Initial folder safeguards: 16 files, 3 MiB/file, 24 MiB aggregate, 64 KiB/line, 4,096 retained outcomes and 1,024 immediate entries.
+      Initial folder safeguards: 16 files, 3 MiB/file, 24 MiB aggregate, 256 KiB/line, 4,096 retained outcomes and 1,024 immediate entries.
       Any file failure rejects the whole batch. Ignored entries are counted as uncovered; no recursive inspection occurs.
       The dialog hides New Folder where supported; shell writes and network browsing are not fully prevented.
       Locality checks enforce admission. Windows may retain dialog history independently of ABF.</p>
