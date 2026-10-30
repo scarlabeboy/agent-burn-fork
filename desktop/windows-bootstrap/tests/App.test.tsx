@@ -312,7 +312,7 @@ test('renders deterministically without runtime inputs', () => {
   }
 });
 
-test('frontend allows only the reviewed core invoke and the four reviewed commands, with no network, timers or storage', () => {
+test('frontend allows only the reviewed core invoke and five reviewed commands, with no network, timers or storage', () => {
   const root = fileURLToPath(new URL('../frontend/src/', import.meta.url));
   const files = (directory: string): string[] =>
     readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
@@ -324,21 +324,23 @@ test('frontend allows only the reviewed core invoke and the four reviewed comman
     /@tauri-apps|__TAURI|\binvoke\s*(?:<[^>]*>)?\s*\(|\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|setInterval|setTimeout|requestAnimationFrame|localStorage|sessionStorage|indexedDB|document\.cookie|node:fs|child_process|https?:\/\/|@import|url\(|@font-face/u;
   for (const file of sources) {
     let source = readFileSync(file, 'utf8');
-    // Each reviewed bridge file may hold exactly one official core import and one fixed call with only its approved arguments.
-    const reviewed: Record<string, string> = {
-      'syntheticBridge.ts': 'abf_get_synthetic_snapshot',
-      'fictionalClaudeBridge.ts': 'abf_get_fictional_claude_summary',
-      'fictionalFileDiagnostic.ts': 'abf_read_fictional_claude_file_once',
-      'claudeCopyDiagnostic.ts': 'abf_read_claude_copy_once',
+    // Each bridge has one core import and exactly its listed calls/arguments.
+    const reviewed: Record<string, readonly string[]> = {
+      'syntheticBridge.ts': ["invoke<unknown>('abf_get_synthetic_snapshot')"],
+      'fictionalClaudeBridge.ts': ["invoke<unknown>('abf_get_fictional_claude_summary')"],
+      'fictionalFileDiagnostic.ts': ["invoke<unknown>('abf_read_fictional_claude_file_once')"],
+      'claudeCopyDiagnostic.ts': ["invoke<unknown>('abf_read_claude_copy_once', { relativePath })",
+        "invoke<unknown>('abf_choose_claude_jsonl_once')"],
     };
-    const command = Object.entries(reviewed).find(([name]) => file === join(root, name))?.[1];
-    if (command !== undefined) {
+    const calls = Object.entries(reviewed).find(([name]) => file === join(root, name))?.[1];
+    if (calls !== undefined) {
       const allowedImport = "import { invoke } from '@tauri-apps/api/core';";
-      const allowedCall = command === 'abf_read_claude_copy_once'
-        ? `invoke<unknown>('${command}', { relativePath })` : `invoke<unknown>('${command}')`;
       assert.equal(source.split(allowedImport).length, 2, 'one official core invoke import');
-      assert.equal(source.split(allowedCall).length, 2, 'one approved application command with exact arguments');
-      source = source.replace(allowedImport, '').replace(allowedCall, '');
+      source = source.replace(allowedImport, '');
+      for (const allowedCall of calls) {
+        assert.equal(source.split(allowedCall).length, 2, 'one approved application command with exact arguments');
+        source = source.replace(allowedCall, '');
+      }
     }
     assert.doesNotMatch(source, forbidden, `${file} must not use forbidden capabilities`);
   }
@@ -437,7 +439,7 @@ test('official core invoke sends only the approved command with no frontend argu
   }
 });
 
-test('native boundary registers exactly the four reviewed commands and enables only official IPC CSP endpoints', () => {
+test('native boundary registers exactly five reviewed commands and enables only official IPC CSP endpoints', () => {
   const nativeRoot = new URL('../src-tauri/', import.meta.url);
   const main = readFileSync(new URL('src/main.rs', nativeRoot), 'utf8');
   const command = readFileSync(new URL('src/synthetic_snapshot.rs', nativeRoot), 'utf8');
@@ -445,8 +447,10 @@ test('native boundary registers exactly the four reviewed commands and enables o
   const config = JSON.parse(readFileSync(new URL('tauri.conf.json', nativeRoot), 'utf8'));
   const handlers = [...main.matchAll(/\.invoke_handler\(tauri::generate_handler!\[([^\]]*)\]\)/gu)];
   assert.deepEqual(handlers.map((match) => match[1]?.replace(/\s+/gu, ' ').trim()), [
-    'synthetic_snapshot::abf_get_synthetic_snapshot, fictional_claude_summary::abf_get_fictional_claude_summary, abf_read_fictional_claude_file_once, abf_read_claude_copy_once',
+    'synthetic_snapshot::abf_get_synthetic_snapshot, fictional_claude_summary::abf_get_fictional_claude_summary, abf_read_fictional_claude_file_once, abf_read_claude_copy_once, abf_choose_claude_jsonl_once',
   ]);
+  assert.match(main, /async fn abf_choose_claude_jsonl_once\(\s*window: tauri::WebviewWindow,\s*state: tauri::State<'_, std::sync::Arc<claude_copy_read::CopyReader>>,\s*\) -> Result<Option<String>, &'static str>/u,
+    'picker IPC has only injected native window/state, with no frontend path parameter (static check)');
   const claude = readFileSync(new URL('src/fictional_claude_summary.rs', nativeRoot), 'utf8');
   assert.equal([...claude.matchAll(/#\[tauri::command\]/gu)].length, 1);
   assert.match(claude, /fn abf_get_fictional_claude_summary\(\) -> String/u);

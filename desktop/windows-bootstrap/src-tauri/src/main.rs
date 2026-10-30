@@ -35,6 +35,18 @@ async fn abf_read_claude_copy_once(
         .map_err(|_| "COPY_READ_FAILED")?
 }
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+#[tauri::command]
+async fn abf_choose_claude_jsonl_once(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, std::sync::Arc<claude_copy_read::CopyReader>>,
+) -> Result<Option<String>, &'static str> {
+    let reader = std::sync::Arc::clone(state.inner());
+    let owner = window.hwnd().map_err(|_| "COPY_DIALOG_FAILED")?.0 as usize;
+    tauri::async_runtime::spawn_blocking(move || reader.pick(owner))
+        .await
+        .map_err(|_| "COPY_READ_FAILED")?
+}
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 mod synthetic_snapshot;
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -89,7 +101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             synthetic_snapshot::abf_get_synthetic_snapshot,
             fictional_claude_summary::abf_get_fictional_claude_summary,
             abf_read_fictional_claude_file_once,
-            abf_read_claude_copy_once
+            abf_read_claude_copy_once,
+            abf_choose_claude_jsonl_once
         ])
         .setup(move |app| {
             tauri::WebviewWindowBuilder::new(

@@ -2,10 +2,19 @@
 
 An isolated, unpublished Windows x64 Tauri v2 host candidate with a bundled React,
 TypeScript and Vite frontend. Its dashboard displays fictional and synthetic demonstrations;
-a separate manual diagnostic can read one explicitly configured Windows JSONL copy.
+a separate manual diagnostic can read one explicitly selected Windows JSONL file.
 Windows and Selected WSL are distinct display fixtures; Computer is a derived
 view, never a collection source. Dashboard totals remain synthetic. The copy reader
 reports observed record claims separately, with no account, quota or cost integration.
+
+In **Windows / Claude Code**, click **Choose JSONL file...** and select one local
+fixed-drive `.jsonl` file in the native Windows dialog. The picker needs no
+`ABF_BOOTSTRAP_CLAUDE_COPY_ROOT`. The separate `ABF_BOOTSTRAP_RUNTIME_ROOT` remains
+required for the isolated WebView2 profile. Cancelling reads no source and leaves
+the attempt available. A selection, including a refused or failed read, consumes
+the one attempt shared with **Configured copy root (optional legacy flow)**.
+The existing snapshot appears after a validated result. **Clear copy result**
+removes it without rearming a consumed attempt. Restart for another read.
 
 This workspace has its own pnpm workspace and locks and a standalone Rust
 workspace. It does not import the production CLI or macOS application. The fictional Claude
@@ -220,6 +229,52 @@ are NOT_RUN. CI and a separately authorized Windows visual check remain separate
 
 ## Explicit Windows Claude copy diagnostic (ABF137)
 
+### Native explicit file picker (ABF145)
+
+`abf_choose_claude_jsonl_once() -> Promise<string | null>` accepts no path argument.
+Rust opens an owner-modal Windows `GetOpenFileNameW` dialog, with one `.jsonl`
+filter, no multiselect, shortcut dereferencing or custom hooks. It sets
+`OFN_NOCHANGEDIR`, which Microsoft documents as ineffective for `GetOpenFileName`;
+the process working directory is not guaranteed to remain unchanged. It also sets
+`OFN_DONTADDTORECENT`, which does not guarantee absence of Windows-managed
+common-dialog history. Windows may retain selected files or directories independently
+of ABF. Only its native selected buffer supplies authority;
+the frontend receives the existing sanitized result, `null` for cancellation, or
+a fixed error code. Opening the dialog does not consume the source-read attempt.
+An active selection blocks both entry paths. Dialog failure consumes the attempt;
+Clear suppresses late payloads and does not close the dialog or cancel filesystem
+I/O. If that dialog is then cancelled, the unused attempt becomes available.
+
+Admission conservatively requires an ASCII ordinary absolute drive path of at most
+259 characters, lowercase `.jsonl`, and a parent below the drive root (the shared
+collector refuses drive-root authority). Reserved names, streams, traversal,
+UNC/device/WSL syntax and unsupported names are refused before source metadata.
+`GetDriveTypeW` must report `DRIVE_FIXED`; `QueryDosDeviceW` must identify a direct
+`\Device\HarddiskVolume` followed by digits. Remote/mapped drives, SUBST aliases,
+unknown mappings and unsupported volume types are refused as locality uncovered.
+Ancestors are checked from the drive downward, then the selected target is checked
+again for regular-file status and symlink/reparse redirection immediately before
+the shared collector's own revalidation and read-only open. No sibling file is
+enumerated or collected; selection is not authority for another file in its parent.
+The OS owns dialog navigation; application source access starts only after admission.
+These are Contract A V2 path-based safeguards, not absolute race-free confinement.
+
+The existing `CopyReader`, parser, limits, replay calculations, sanitized payload
+and ABF144 snapshot are reused. The legacy `configured-windows-copy` provenance
+label is retained as the transport's acquisition category; neither selection nor
+that label establishes the records' original source or environment. The 1 MiB
+file/batch, 64 KiB line, 1024 outcome and 16 KiB response caps remain shared. Rust
+also enforces the response cap. No paths or raw content enter the picker IPC result,
+ABF-controlled logs or persistence. No dependency, lockfile, capability or filesystem grant was added;
+the narrow native modules link existing Windows Kernel32 and Comdlg32 APIs.
+
+Synthetic Linux tests cover admission decisions, dialog policy/buffer handling,
+cancellation, failures, concurrent/shared guards, selected-only authority, resource
+caps, payload invariants and frontend rendering/Clear. Native Windows compilation,
+dialog/IPC/WebView2 execution, actual drive/reparse behavior and Windows 10/11
+compatibility are **NOT_RUN**. Synthetic tests do not validate these native mechanisms.
+The following relative-path configuration details describe the retained legacy flow.
+
 ABF144 puts this reader before the synthetic dashboard and fictional scenarios.
 After a validated result, a compact session snapshot shows four separate raw
 observed token components, records with and without valid claims, file and line
@@ -231,7 +286,7 @@ Clear removes both views and leaves the one-attempt limit consumed. Selection
 changes only hide or restore the retained result; they never read again. The
 capture's current freshness and original source/environment remain unknown.
 
-Windows / Claude Code has a separate **Read selected copy once** action and
+Windows / Claude Code retains a legacy **Read selected copy once** action and
 **Clear copy result** action. Its result never enters dashboard totals, historical
 fictional panels, environment aggregation or Computer. This is a diagnostic-local
 contract, not a production event or persistence schema.
@@ -302,14 +357,14 @@ is explicitly a fictional test of this copy transport, not proof of provenance.
 
 Native errors are fixed codes only: `COPY_NOT_CONFIGURED`, `COPY_ATTEMPT_CONSUMED`,
 `COPY_PATH_REFUSED`, `COPY_ROOT_REFUSED`, `COPY_LOCALITY_UNCOVERED`,
-`COPY_PLATFORM_UNSUPPORTED`, or `COPY_READ_FAILED`. Frontend transport validation
-adds `COPY_RESPONSE_INVALID`; unknown rejection details become `COPY_READ_FAILED`.
+`COPY_PLATFORM_UNSUPPORTED`, `COPY_READ_FAILED`, `COPY_BUSY`, `COPY_DIALOG_FAILED`
+or `COPY_RESPONSE_INVALID`; unknown rejection details become `COPY_READ_FAILED`.
 The summary's file failure codes remain numerical counts (`path`, `tooLarge`,
 `byteBudget`, `outputLimit`, `changedDuringRead`, `io`).
 
-Both frontend and native guards allow one attempt per process/module lifetime,
-including errors and concurrent requests. No mount, selection, timer, polling,
-refresh or automatic retry invokes this command. Clearing removes UI results,
+Both frontend and native guards share one attempt per process/module lifetime,
+including selected-file failures and concurrent requests. Only explicit actions
+invoke a read; no mount, timer, polling, refresh or automatic retry does. Clearing removes UI results,
 discards late completions and leaves the attempt consumed. It does not cancel a
 blocking filesystem read or delete files. A displayed capture has unknown current
 freshness; complete file reading does not establish complete usage. Restart is

@@ -31,6 +31,7 @@ type ShellViewProps = Readonly<{
   fileDiagnostic?: FileDiagnosticState;
   copyDiagnostic?: CopyDiagnosticState;
   onRunCopyDiagnostic?: (relativePath: string) => void;
+  onChooseCopyDiagnostic?: () => void;
   onClearCopyDiagnostic?: () => void;
   onRunFileDiagnostic?: () => void;
   onClearFileDiagnostic?: () => void;
@@ -271,26 +272,34 @@ function ClaudeCopySnapshot({ summary, replay }: Readonly<{
   </>;
 }
 
-function ClaudeCopyPanel({ state, onRun, onClear }: Readonly<{
-  state: CopyDiagnosticState; onRun?: (relativePath: string) => void; onClear?: () => void;
+function ClaudeCopyPanel({ state, onRun, onChoose, onClear }: Readonly<{
+  state: CopyDiagnosticState; onRun?: (relativePath: string) => void; onChoose?: () => void; onClear?: () => void;
 }>): React.JSX.Element {
   const [relativePath, setRelativePath] = React.useState('');
   return <Region id="claude-copy" title="Explicit Windows Claude JSONL copy - manual read">
-    <p className="page-note">Explicitly configured Windows copy; original source and environment are not established.
+    <p className="page-note">Explicitly selected Windows JSONL; original source and environment are not established.
       This result stays separate from all environment, Computer and demo totals.</p>
     <p className="page-note">One manual attempt per app run, including failures. No refresh or persistence.
       Counting basis: observed record claims. Duplicate identity is unresolved; these are not unique events or billed consumption.</p>
     <p className="page-note">Copy limits: one file, 1 MiB per file, 64 KiB per line and 1,024 retained record outcomes.</p>
-    <label>Relative JSONL path (use / between folders)
-      <input value={relativePath} maxLength={512} disabled={state.attempted}
-        onChange={(event) => setRelativePath(event.target.value)} autoComplete="off" spellCheck={false} />
-    </label>
-    <button type="button" disabled={state.attempted || relativePath.length === 0}
-      onClick={() => { onRun?.(relativePath); setRelativePath(''); }}>Read selected copy once</button>
+    <button type="button" disabled={state.attempted}
+      onClick={() => { onChoose?.(); setRelativePath(''); }}>Choose JSONL file...</button>
+    <p className="page-note">Choose one local fixed-drive .jsonl file in the native Windows dialog. No copy-root setup is required.
+      Cancelling reads no source and leaves the attempt available. Network paths, mapped drives and detected redirections are refused.</p>
+    <details><summary>Configured copy root (optional legacy flow)</summary>
+      <label>Relative JSONL path (use / between folders)
+        <input value={relativePath} maxLength={512} disabled={state.attempted}
+          onChange={(event) => setRelativePath(event.target.value)} autoComplete="off" spellCheck={false} />
+      </label>
+      <button type="button" disabled={state.attempted || relativePath.length === 0}
+        onClick={() => { onRun?.(relativePath); setRelativePath(''); }}>Read selected copy once</button>
+    </details>
     <button type="button" disabled={!state.attempted || state.status === 'cleared'}
       onClick={() => { setRelativePath(''); onClear?.(); }}>Clear copy result</button>
     <p className="page-note" role="status" aria-live="polite">{
-      state.status === 'idle' ? 'Ready. A separately configured copy root is required.'
+      state.status === 'idle' ? 'Ready. Choose a JSONL file to read once.'
+        : state.status === 'cancelled' ? 'Cancelled. No source read; the attempt is still available.'
+        : state.status === 'selecting' ? 'Native file selection or read in progress. No result yet.'
         : state.status === 'running' ? 'Reading selected copy. No result yet.'
           : state.status === 'cleared' ? 'Result cleared from memory. Attempt remains consumed; late results are discarded.'
             : state.status === 'unavailable' ? `Unavailable: ${state.code}. No result; restart required for another attempt.`
@@ -332,7 +341,7 @@ function QuotaPanel({ panel }: Readonly<{ panel: QuotaPanelDefinition }>): React
   );
 }
 
-export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bridgeState = { status: 'loading' }, fictionalClaude, fileDiagnostic, onRunFileDiagnostic, onClearFileDiagnostic, copyDiagnostic, onRunCopyDiagnostic, onClearCopyDiagnostic }: ShellViewProps): React.JSX.Element {
+export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bridgeState = { status: 'loading' }, fictionalClaude, fileDiagnostic, onRunFileDiagnostic, onClearFileDiagnostic, copyDiagnostic, onRunCopyDiagnostic, onChooseCopyDiagnostic, onClearCopyDiagnostic }: ShellViewProps): React.JSX.Element {
   const environment = environmentOf(selection);
   const harness = harnessOf(selection);
   const isGeneral = harness.id === 'general';
@@ -394,7 +403,7 @@ export function ShellView({ selection, onSelectEnvironment, onSelectHarness, bri
             ? 'Windows dashboard fixture. Automatic collection disabled; manual copy reader below is separate.' : environment.scope}</p>
           <p className="page-note">{copyDiagnostic === undefined ? shellText.explanation : 'Dashboard is synthetic; manual copy reader is separate. No account, quota or spending is observed.'}</p>
           {copyDiagnostic !== undefined && environment.id === 'windows' && harness.id === 'claude-code'
-            ? <ClaudeCopyPanel state={copyDiagnostic} onRun={onRunCopyDiagnostic} onClear={onClearCopyDiagnostic} /> : null}
+            ? <ClaudeCopyPanel state={copyDiagnostic} onRun={onRunCopyDiagnostic} onChoose={onChooseCopyDiagnostic} onClear={onClearCopyDiagnostic} /> : null}
           {copyDiagnostic !== undefined ? <h2 className="section-title">Synthetic dashboard - demonstration only</h2> : null}
           <p className="page-note" role="status">
             {bridgeState.status === 'synthetic'
@@ -571,6 +580,7 @@ export function App(): React.JSX.Element {
   );
   return <ShellView selection={selection} onSelectEnvironment={onSelectEnvironment} onSelectHarness={onSelectHarness} bridgeState={bridgeState}
     copyDiagnostic={copyDiagnostic} onRunCopyDiagnostic={(path) => { void claudeCopyDiagnostic.run(path); }}
+    onChooseCopyDiagnostic={() => { void claudeCopyDiagnostic.choose(); }}
     onClearCopyDiagnostic={claudeCopyDiagnostic.clear} fictionalClaude={fictionalClaude} fileDiagnostic={fileDiagnostic}
     onRunFileDiagnostic={() => { void fictionalFileDiagnostic.run(); }} onClearFileDiagnostic={fictionalFileDiagnostic.clear} />;
 }

@@ -12,6 +12,110 @@ const rawGolden = readFileSync(new URL('../fixtures/abf137-expected-payload.json
 const golden = JSON.stringify({ schemaVersion: 1, raw: JSON.parse(rawGolden), replay: { status: 'allocation-failure' } });
 const copy: unknown = JSON.parse(rawGolden);
 assert.ok(isClaudeCopySummary(copy));
+
+test('picker cancellation reads nothing and allows either entry path afterwards', async () => {
+  let legacyCalls = 0;
+  const reader = createClaudeCopyDiagnostic(async () => { legacyCalls++; return golden; }, async () => null);
+  await reader.choose();
+  assert.deepEqual(reader.getSnapshot(), { status: 'cancelled', attempted: false });
+  assert.equal(legacyCalls, 0);
+  await reader.run('chosen.jsonl');
+  assert.equal(reader.getSnapshot().status, 'copy');
+  assert.equal(legacyCalls, 1);
+});
+
+test('picker shares pending and consumed guards with legacy and Clear suppresses late results', async () => {
+  let finish: (value: unknown) => void = () => assert.fail('not requested');
+  let selections = 0;
+  const reader = createClaudeCopyDiagnostic(async () => assert.fail('legacy must stay blocked'),
+    () => { selections++; return new Promise((resolve) => { finish = resolve; }); });
+  const pending = reader.choose();
+  assert.equal(reader.getSnapshot().status, 'selecting');
+  await reader.choose();
+  await reader.run('unselected.jsonl');
+  reader.clear();
+  finish(golden);
+  await pending;
+  assert.equal(reader.getSnapshot().status, 'cleared');
+  await reader.choose();
+  assert.equal(selections, 1);
+});
+
+test('Clear during a cancelled dialog does not consume a nonexistent read attempt', async () => {
+  let finish: (value: unknown) => void = () => assert.fail('not requested');
+  const reader = createClaudeCopyDiagnostic(async () => golden, () => new Promise((resolve) => { finish = resolve; }));
+  const pending = reader.choose();
+  reader.clear();
+  finish(null);
+  await pending;
+  assert.deepEqual(reader.getSnapshot(), { status: 'cancelled', attempted: false });
+  await reader.run('copy.jsonl');
+  assert.equal(reader.getSnapshot().status, 'copy');
+});
+
+test('picker errors consume the attempt and disclose only a fixed code', async () => {
+  const reader = createClaudeCopyDiagnostic(async () => assert.fail('legacy blocked'), async () => { throw new Error('PRIVATE C:\\secret.jsonl'); });
+  await reader.choose();
+  assert.deepEqual(reader.getSnapshot(), { status: 'unavailable', attempted: true, code: 'COPY_READ_FAILED' });
+  await reader.run('copy.jsonl');
+});
+
+for (const code of ['COPY_DIALOG_FAILED', 'COPY_PATH_REFUSED', 'COPY_ROOT_REFUSED',
+  'COPY_LOCALITY_UNCOVERED', 'COPY_ATTEMPT_CONSUMED', 'COPY_BUSY', 'COPY_RESPONSE_INVALID']) {
+  test(`picker preserves fixed native failure ${code}`, async () => {
+    const reader = createClaudeCopyDiagnostic(async () => assert.fail('legacy blocked'), async () => { throw code; });
+    await reader.choose();
+    assert.deepEqual(reader.getSnapshot(), { status: 'unavailable', attempted: true, code });
+    await reader.run('copy.jsonl');
+  });
+}
+
+test('picker action is available only in Windows / Claude Code', () => {
+  for (const environment of ['windows', 'selected-wsl', 'computer'] as const) {
+    for (const harness of ['general', 'claude-code', 'codex', 'opencode'] as const) {
+      const markup = renderToStaticMarkup(createElement(ShellView, {
+        selection: { environment, harness }, onSelectEnvironment: () => {}, onSelectHarness: () => {},
+        copyDiagnostic: { status: 'idle', attempted: false },
+      }));
+      assert.equal(markup.includes('Choose JSONL file...'), environment === 'windows' && harness === 'claude-code');
+    }
+  }
+});
+
+test('native picker IPC accepts no frontend path and successful selection renders the snapshot', async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const calls: unknown[] = [];
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    __TAURI_INTERNALS__: { invoke: (...args: unknown[]) => { calls.push(args); return Promise.resolve(golden); } },
+  } });
+  try {
+    const reader = createClaudeCopyDiagnostic();
+    assert.equal(calls.length, 0);
+    await reader.choose();
+    assert.deepEqual(calls, [['abf_choose_claude_jsonl_once', {}, undefined]]);
+    const markup = renderToStaticMarkup(createElement(ShellView, {
+      selection: { environment: 'windows', harness: 'claude-code' },
+      onSelectEnvironment: () => {}, onSelectHarness: () => {}, copyDiagnostic: reader.getSnapshot(),
+    }));
+    assert.match(markup, /Manual copy session snapshot/u);
+    assert.match(markup, /disabled=""[^>]*>Choose JSONL file\.\.\./u);
+    assert.doesNotMatch(markup, /C:\\|PRIVATE|\.jsonl<\/dd>/u);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'window', previous);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
+
+test('cancelled picker renders ready controls and a no-read cancellation status', async () => {
+  const reader = createClaudeCopyDiagnostic(async () => golden, async () => null);
+  await reader.choose();
+  const markup = renderToStaticMarkup(createElement(ShellView, {
+    selection: { environment: 'windows', harness: 'claude-code' },
+    onSelectEnvironment: () => {}, onSelectHarness: () => {}, copyDiagnostic: reader.getSnapshot(),
+  }));
+  assert.match(markup, /Cancelled\. No source read; the attempt is still available/u);
+  assert.match(markup, /<button type="button">Choose JSONL file\.\.\.<\/button>/u);
+});
 test('copy validator requires separate provenance and strict numerical payload', () => {
   assert.equal(isClaudeCopySummary(copy), true);
   for (const bad of [fixture, { ...copy, environmentKind: 'windows' }, { ...copy, hostMatch: 'native' }, { ...copy, secret: 'PRIVATE' },
@@ -188,7 +292,7 @@ const noObservations = {
 } as const satisfies ComponentSummary;
 const emptyComponents = { input: noObservations, output: noObservations, cacheCreation: noObservations, cacheRead: noObservations };
 function visibleCopy(summary: ClaudeCopySummary): string {
-  return copyPanel(summary).split('<details')[0] ?? '';
+  return copyPanel(summary).split('<details class="scenario copy-details"')[0] ?? '';
 }
 test('manual reader precedes synthetic metrics and fictional scenarios', async () => {
   const html = await renderResult(replayFixture);
@@ -228,14 +332,14 @@ test('partial coverage is visible without opening diagnostics', () => {
 });
 test('compact replay distinguishes candidate observations from exact copies', async () => {
   const result: unknown = JSON.parse(readFileSync(new URL('../fixtures/abf143-candidates-payload.json', import.meta.url), 'utf8'));
-  const visible = (await renderResult(result)).split('<details')[0] ?? '';
+  const visible = (await renderResult(result)).split('<details class="scenario copy-details"')[0] ?? '';
   assert.match(visible, /Confirmed exact copies: 0/u);
   assert.match(visible, /Unconfirmed matching-request candidate observations: 2/u);
   assert.match(visible, /Unresolved observations: 2/u);
   assert.match(visible, /Candidate observations are not duplicate copies or groups/u);
 });
 test('snapshot reports confirmed replay copies without replacing the raw token claims', async () => {
-  const visible = (await renderResult(replayFixture)).split('<details')[0] ?? '';
+  const visible = (await renderResult(replayFixture)).split('<details class="scenario copy-details"')[0] ?? '';
   assert.match(visible, /Confirmed exact copies: 1/u);
   assert.match(visible, /Unconfirmed matching-request candidate observations: 0/u);
   assert.match(visible, /Unresolved observations: 0/u);
